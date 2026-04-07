@@ -1,0 +1,2193 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sistema de Reportes Médicos</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js">
+
+// ═══════════════════════════════════════════════════════
+// CITAS STATE
+// ═══════════════════════════════════════════════════════
+let citasRaw=[];
+let citasPivotData=null;
+
+// Exclusions — names to remove from citas
+const CITAS_EXCLUDE=new Set([
+  'Sesión de Acupuntura','Sesión de Acupuntura Incluída',
+  'Sesión de Masaje','Sesión de Masaje Incluída',
+  'Consulta de nutrición','Consulta de nutrición incluida',
+  'Consulta de nutrición online','Consulta de nutrición online incluida',
+  'Terapia psicológica','Terapia psicológica incluida',
+  'Terapia psicológica online','Terapia psicológica online incluida',
+  'Consulta ginecológica'
+]);
+
+// ── CITAS UPLOAD ───────────────────────────────────────
+const citasDropZone=document.getElementById('citas-drop-zone');
+const citasInput=document.getElementById('citas-file-input');
+citasDropZone.addEventListener('dragover',function(e){e.preventDefault();citasDropZone.classList.add('drag-over');});
+citasDropZone.addEventListener('dragleave',function(){citasDropZone.classList.remove('drag-over');});
+citasDropZone.addEventListener('drop',function(e){e.preventDefault();citasDropZone.classList.remove('drag-over');if(e.dataTransfer.files[0])handleCitasFile(e.dataTransfer.files[0]);});
+citasInput.addEventListener('change',function(e){if(e.target.files[0])handleCitasFile(e.target.files[0]);});
+
+function handleCitasFile(file){
+  const isCsv=file.name.toLowerCase().endsWith('.csv');
+  const reader=new FileReader();
+  if(isCsv){
+    reader.onload=function(e){
+      try{
+        const rows=parseCSVRobust(e.target.result);
+        processCitasRows(rows,file.name);
+      }catch(err){showToast('Error CSV citas: '+err.message,'error');}
+    };
+    reader.readAsText(file,'UTF-8');
+  } else {
+    reader.onload=function(e){
+      const wb=XLSX.read(e.target.result,{type:'array',cellDates:true});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      processCitasRows(XLSX.utils.sheet_to_json(ws,{defval:''}),file.name);
+    };
+    reader.readAsArrayBuffer(file);
+  }
+}
+
+function processCitasRows(rows,filename){
+  if(!rows.length){showToast('Archivo citas vacío','error');return;}
+  citasRaw=rows;
+  document.getElementById('citas-banner').classList.add('visible');
+  document.getElementById('citas-banner-name').textContent=filename;
+  document.getElementById('citas-banner-meta').textContent=rows.length.toLocaleString()+' registros de citas';
+  showToast('Citas cargadas: '+rows.length.toLocaleString()+' filas','success');
+}
+
+function resetCitas(){
+  citasRaw=[];citasPivotData=null;
+  document.getElementById('citas-banner').classList.remove('visible');
+  document.getElementById('citas-file-input').value='';
+  document.getElementById('citas-container').innerHTML='';
+  document.getElementById('conv-container').innerHTML='';
+}
+
+// ── BUILD CITAS PIVOT ──────────────────────────────────
+function buildCitasPivot(yms){
+  // Filter: year>=2025, estado=Terminada, primera vez names, not excluded
+  const PRIMERA=[
+    'Consulta primera vez','Consulta primera vez 30min',
+    'Consulta primera vez gratis','Consulta primera vez online',
+    'Consulta primera vez online gratis','(Ex) Consulta primera vez',
+    "Consulta de Primera Vez IP's",'Consulta genética primera vez'
+  ];
+  const filtered=citasRaw.filter(function(r){
+    const ym=parseFch(r.fecha);
+    if(!ym) return false;
+    const year=parseInt(ym.substring(0,4));
+    if(isNaN(year)||year<2025) return false;
+    if(r.estados_citas_name!=='Terminada') return false;
+    if(!PRIMERA.includes(r.citas_concep_name)) return false;
+    if(CITAS_EXCLUDE.has(r.citas_concep_name)) return false;
+    return true;
+  });
+
+  const sedeSet=new Set(), pivot={};
+  filtered.forEach(function(r){
+    const sede=r.delegaciones_name_comer||'(Sin sede)';
+    const ym=parseFch(r.fecha);
+    sedeSet.add(sede);
+    if(!pivot[sede])pivot[sede]={};
+    if(!pivot[sede][ym])pivot[sede][ym]=0;
+    pivot[sede][ym]++;
+  });
+
+  const sedes=[...sedeSet].sort();
+  citasPivotData={sedes,yms,pivot};
+  return citasPivotData;
+}
+
+// ── CONVERSION TABLE ───────────────────────────────────
+function buildConversionTable(ciclosPivot, citasPivot){
+  const sedes=ciclosPivot.sedes;
+  const yms=ciclosPivot.yms;
+  const cp=ciclosPivot.pivot;
+  const tp=citasPivot.pivot;
+
+  let html='<table class="pivot-table"><thead><tr>';
+  html+='<th class="sede-h">Sede</th>';
+  yms.forEach(function(ym){html+='<th class="conv-h">'+ym+'</th>';});
+  html+='<th class="conv-h">Total</th></tr></thead><tbody>';
+
+  let grandCiclos=0, grandCitas=0;
+  const colCiclos={}, colCitas={};
+  yms.forEach(function(ym){colCiclos[ym]=0;colCitas[ym]=0;});
+
+  sedes.forEach(function(sede){
+    html+='<tr><td class="sede-cell">'+sede+'</td>';
+    let rowCiclos=0, rowCitas=0;
+    yms.forEach(function(ym){
+      const ciclos=cp[sede]&&cp[sede][ym]?cp[sede][ym].size:0;
+      const citas=tp[sede]&&tp[sede][ym]?tp[sede][ym]:0;
+      const conv=citas>0?((ciclos/citas)*100).toFixed(1):'—';
+      const cls=conv!=='—'&&parseFloat(conv)>0?'conv-cell':'zero';
+      html+='<td class="'+cls+'">'+(conv!=='—'?conv+'%':'—')+'</td>';
+      rowCiclos+=ciclos; rowCitas+=citas;
+      colCiclos[ym]+=ciclos; colCitas[ym]+=citas;
+    });
+    const rowConv=rowCitas>0?((rowCiclos/rowCitas)*100).toFixed(1)+'%':'—';
+    html+='<td class="conv-cell">'+rowConv+'</td></tr>';
+    grandCiclos+=rowCiclos; grandCitas+=rowCitas;
+  });
+
+  // Total row
+  html+='<tr class="total-row"><td class="sede-cell">TOTAL</td>';
+  yms.forEach(function(ym){
+    const conv=colCitas[ym]>0?((colCiclos[ym]/colCitas[ym])*100).toFixed(1)+'%':'—';
+    html+='<td>'+conv+'</td>';
+  });
+  const grandConv=grandCitas>0?((grandCiclos/grandCitas)*100).toFixed(1)+'%':'—';
+  html+='<td>'+grandConv+'</td></tr>';
+  html+='</tbody></table>';
+  return html;
+}
+
+
+// ═══════════════════════════════════════════════════════
+// CONVERSIÓN POR DOCTOR
+// ═══════════════════════════════════════════════════════
+function buildXdoc(){
+  if(!pivotData){
+    document.getElementById('xdoc-info-card').style.display='block';
+    document.getElementById('xdoc-result').classList.remove('visible');
+    return;
+  }
+  document.getElementById('xdoc-info-card').style.display='none';
+
+  const yms=pivotData.yms;
+
+  // ── Ciclos por doctor ───────────────────────────────
+  // pivot[sede][ym] is Set of his_name — we need doctor dimension from ciclosRaw
+  const docCiclos={};  // docCiclos[doctor][ym] = Set of his_name
+  const activeTratArr=[...activeTrats];
+  ciclosRaw.forEach(function(r){
+    const ym=parseFch(r.fecha_final);
+    if(!ym) return;
+    const year=parseInt(ym.substring(0,4));
+    if(isNaN(year)||year<2025) return;
+    const tipo=(r.tipo_paciente||'').trim();
+    if(!tipo||tipo==='Externo') return;
+    if(!activeTratArr.includes(r.tratamiento)) return;
+    const doc=(r.doctor||'').trim();
+    if(!doc) return;
+    if(!docCiclos[doc]) docCiclos[doc]={};
+    if(!docCiclos[doc][ym]) docCiclos[doc][ym]=new Set();
+    docCiclos[doc][ym].add(r.his_name||r.his_id||'?');
+  });
+
+  // ── Citas por doctor ────────────────────────────────
+  const PRIMERA=[
+    'Consulta primera vez','Consulta primera vez 30min',
+    'Consulta primera vez gratis','Consulta primera vez online',
+    'Consulta primera vez online gratis','(Ex) Consulta primera vez',
+    "Consulta de Primera Vez IP's",'Consulta genética primera vez'
+  ];
+  const docCitas={};  // docCitas[doctor][ym] = count
+  if(citasRaw.length>0){
+    citasRaw.forEach(function(r){
+      const ym=parseFch(r.fecha);
+      if(!ym) return;
+      const year=parseInt(ym.substring(0,4));
+      if(isNaN(year)||year<2025) return;
+      if(r.estados_citas_name!=='Terminada') return;
+      if(!PRIMERA.includes(r.citas_concep_name)) return;
+      if(CITAS_EXCLUDE.has(r.citas_concep_name)) return;
+      const doc=(r.profesionales_name||r.profesionales||'').trim();
+      if(!doc) return;
+      if(!docCitas[doc]) docCitas[doc]={};
+      if(!docCitas[doc][ym]) docCitas[doc][ym]=0;
+      docCitas[doc][ym]++;
+    });
+  }
+
+  // Only doctors with at least one ciclo or cita in 2025+
+  const allDocs=new Set([...Object.keys(docCiclos),...Object.keys(docCitas)]);
+  const docs=[...allDocs].filter(function(d){
+    return yms.some(function(ym){
+      return (docCiclos[d]&&docCiclos[d][ym]&&docCiclos[d][ym].size>0)||
+             (docCitas[d]&&docCitas[d][ym]&&docCitas[d][ym]>0);
+    });
+  }).sort();
+
+  document.getElementById('xdoc-citas-container').innerHTML=renderXdocTable(docs,yms,
+    function(doc,ym){return docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;},
+    'count','#5B3EA6','#EDE9FB');
+
+  document.getElementById('xdoc-ciclos-container').innerHTML=renderXdocTable(docs,yms,
+    function(doc,ym){return docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym].size:0;},
+    'count','#1B6CA8','#EBF5FB');
+
+  document.getElementById('xdoc-conv-container').innerHTML=renderXdocTable(docs,yms,
+    function(doc,ym){
+      const ciclos=docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym].size:0;
+      const citas=docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;
+      return citas>0?parseFloat(((ciclos/citas)*100).toFixed(1)):null;
+    },
+    'pct','#9A6B00','#FEF9EC');
+
+  // Store for export
+  window._xdocState={docs,yms,docCiclos,docCitas};
+  show('xdoc-result');
+}
+
+function renderXdocTable(docs,yms,getValue,mode,col,bg){
+  let html='<table class="pivot-table"><thead><tr>';
+  html+='<th class="sede-h" style="min-width:220px;">Doctor</th>';
+  yms.forEach(function(ym){html+='<th>'+ym+'</th>';});
+  html+='<th>Total</th></tr></thead><tbody>';
+
+  let grandN=0, grandD=0;
+  const colN={},colD={};
+  yms.forEach(function(ym){colN[ym]=0;colD[ym]=0;});
+
+  docs.forEach(function(doc){
+    html+='<tr><td class="sede-cell">'+doc+'</td>';
+    let rowN=0,rowD=0;
+    yms.forEach(function(ym){
+      const v=getValue(doc,ym);
+      if(mode==='pct'){
+        const ciclos=window._xdocState&&window._xdocState.docCiclos[doc]&&window._xdocState.docCiclos[doc][ym]?window._xdocState.docCiclos[doc][ym].size:0;
+        const citas=window._xdocState&&window._xdocState.docCitas[doc]&&window._xdocState.docCitas[doc][ym]?window._xdocState.docCitas[doc][ym]:0;
+        colN[ym]+=ciclos;colD[ym]+=citas;
+        const disp=v===null?'—':v+'%';
+        const cls=v===null?'zero':'conv-cell';
+        html+='<td class="'+cls+'">'+disp+'</td>';
+        rowN+=ciclos;rowD+=citas;
+      } else {
+        const n=v||0;
+        colN[ym]+=n;
+        const cls=n===0?'zero':'';
+        html+='<td class="'+cls+'">'+(n===0?'—':n)+'</td>';
+        rowN+=n;
+      }
+    });
+    if(mode==='pct'){
+      const rv=rowD>0?((rowN/rowD)*100).toFixed(1)+'%':'—';
+      html+='<td class="conv-cell">'+rv+'</td>';
+    } else {
+      html+='<td style="font-weight:700;color:var(--accent3)">'+rowN+'</td>';
+      grandN+=rowN;
+    }
+    html+='</tr>';
+  });
+
+  // Total row
+  html+='<tr class="total-row"><td class="sede-cell">TOTAL</td>';
+  yms.forEach(function(ym){
+    if(mode==='pct'){
+      const tv=colD[ym]>0?((colN[ym]/colD[ym])*100).toFixed(1)+'%':'—';
+      html+='<td>'+tv+'</td>';
+    } else {
+      html+='<td>'+colN[ym]+'</td>';
+      grandN+=0;
+    }
+  });
+  if(mode==='pct'){
+    const grand=Object.values(colD).reduce(function(a,b){return a+b;},0);
+    const grandC=Object.values(colN).reduce(function(a,b){return a+b;},0);
+    html+='<td>'+(grand>0?((grandC/grand)*100).toFixed(1)+'%':'—')+'</td>';
+  } else {
+    html+='<td>'+Object.values(colN).reduce(function(a,b){return a+b;},0)+'</td>';
+  }
+  html+='</tr></tbody></table>';
+  return html;
+}
+
+function exportXdocExcel(){
+  if(!window._xdocState){showToast('Genera primero la tabla','error');return;}
+  const {docs,yms,docCiclos,docCitas}=window._xdocState;
+  const wb=XLSX.utils.book_new();
+
+  function addSheet(label,getValue){
+    const rows=[['Doctor',...yms,'Total']];
+    docs.forEach(function(doc){
+      const row=[doc];let rowT=0;
+      yms.forEach(function(ym){const v=getValue(doc,ym)||0;row.push(v);rowT+=v;});
+      row.push(rowT);rows.push(row);
+    });
+    const ws=XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols']=[{wch:36},...yms.map(function(){return{wch:12};}),{wch:12}];
+    XLSX.utils.book_append_sheet(wb,ws,label);
+  }
+
+  addSheet('Citas x Doctor',function(doc,ym){return docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;});
+  addSheet('Ciclos x Doctor',function(doc,ym){return docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym].size:0;});
+
+  const rows3=[['Doctor',...yms,'Total']];
+  docs.forEach(function(doc){
+    const row=[doc];let rN=0,rD=0;
+    yms.forEach(function(ym){
+      const ciclos=docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym].size:0;
+      const citas=docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;
+      const v=citas>0?parseFloat(((ciclos/citas)*100).toFixed(1)):0;
+      row.push(v);rN+=ciclos;rD+=citas;
+    });
+    row.push(rD>0?parseFloat(((rN/rD)*100).toFixed(1)):0);
+    rows3.push(row);
+  });
+  const ws3=XLSX.utils.aoa_to_sheet(rows3);
+  ws3['!cols']=[{wch:36},...yms.map(function(){return{wch:12};}),{wch:12}];
+  XLSX.utils.book_append_sheet(wb,ws3,'Conversion x Doctor %');
+  XLSX.writeFile(wb,'Conversion_Doctor_'+getMonthLabel()+'.xlsx');
+  showToast('Excel descargado','success');
+}
+
+// ═══════════════════════════════════════════════════════
+// PAGE NAV
+// ═══════════════════════════════════════════════════════
+function switchPage(page){
+  ['ventas','ciclos','xdoc'].forEach(function(p){
+    document.getElementById('page-'+p).classList.toggle('active', p===page);
+    document.getElementById('nav-'+p).classList.toggle('active', p===page);
+  });
+  if(page==='xdoc') buildXdoc();
+}
+
+// ═══════════════════════════════════════════════════════
+// CICLOS STATE
+// ═══════════════════════════════════════════════════════
+let ciclosRaw=[];
+let activeTrats=new Set(['FIV','Vitri de Ovulos']);
+let allTrats=[];
+let pivotData=null;
+
+// ── CICLOS UPLOAD ──────────────────────────────────────
+const ciclosDropZone=document.getElementById('ciclos-drop-zone');
+const ciclosInput=document.getElementById('ciclos-file-input');
+ciclosDropZone.addEventListener('dragover',function(e){e.preventDefault();ciclosDropZone.classList.add('drag-over');});
+ciclosDropZone.addEventListener('dragleave',function(){ciclosDropZone.classList.remove('drag-over');});
+ciclosDropZone.addEventListener('drop',function(e){e.preventDefault();ciclosDropZone.classList.remove('drag-over');if(e.dataTransfer.files[0])handleCiclosFile(e.dataTransfer.files[0]);});
+ciclosInput.addEventListener('change',function(e){if(e.target.files[0])handleCiclosFile(e.target.files[0]);});
+
+function parseCSVRobust(text){
+  // Handles quoted fields, commas inside quotes, escaped quotes
+  const rows=[];
+  let headers=null;
+  let i=0;
+  const len=text.length;
+  while(i<len){
+    const row=[];
+    while(i<len){
+      let val='';
+      if(text[i]==='"'){
+        i++; // skip opening quote
+        while(i<len){
+          if(text[i]==='"' && text[i+1]==='"'){val+='"';i+=2;}
+          else if(text[i]==='"'){i++;break;}
+          else{val+=text[i++];}
+        }
+      } else {
+        while(i<len && text[i]!==',' && text[i]!=='\n' && text[i]!=='\r'){val+=text[i++];}
+      }
+      row.push(val.trim());
+      if(i<len && text[i]===','){i++;} else {break;}
+    }
+    // skip \r\n or \n
+    if(i<len && text[i]==='\r') i++;
+    if(i<len && text[i]==='\n') i++;
+    if(row.length===0||(row.length===1&&row[0]==='')) continue;
+    if(!headers){headers=row;}
+    else{
+      const obj={};
+      headers.forEach(function(h,idx){obj[h]=row[idx]||'';});
+      rows.push(obj);
+    }
+  }
+  return rows;
+}
+
+function handleCiclosFile(file){
+  const isCsv=file.name.toLowerCase().endsWith('.csv');
+  const reader=new FileReader();
+  if(isCsv){
+    reader.onload=function(e){
+      try{
+        const rows=parseCSVRobust(e.target.result);
+        processCiclosRows(rows, file.name);
+      }catch(err){showToast('Error CSV: '+err.message,'error');}
+    };
+    reader.readAsText(file,'UTF-8');
+  } else {
+    reader.onload=function(e){
+      const wb=XLSX.read(e.target.result,{type:'array',cellDates:true});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      processCiclosRows(XLSX.utils.sheet_to_json(ws,{defval:''}), file.name);
+    };
+    reader.readAsArrayBuffer(file);
+  }
+}
+
+function parseFch(fch){
+  // "2025-01-15 19:00:00-05" -> "2025-01"
+  if(!fch) return null;
+  const s=String(fch).trim();
+  const m=s.match(/^(\d{4})-(\d{2})/);
+  return m ? m[1]+'-'+m[2] : null;
+}
+
+function processCiclosRows(rows, filename){
+  if(!rows.length){showToast('Archivo vacío','error');return;}
+  ciclosRaw=rows;
+
+  // Detect unique trats (tipo_paciente filtered automatically)
+  const tratSet=new Set();
+  rows.forEach(function(r){ if(r.tratamiento) tratSet.add(r.tratamiento); });
+  allTrats=[...tratSet].sort();
+
+  // Default selections
+  activeTrats=new Set(['FIV','Vitri de Ovulos'].filter(function(t){return tratSet.has(t);}));
+
+  document.getElementById('ciclos-upload-section').style.display='none';
+  document.getElementById('ciclos-banner').classList.add('visible');
+  document.getElementById('ciclos-banner-name').textContent=filename;
+  document.getElementById('ciclos-banner-meta').textContent=rows.length.toLocaleString()+' registros cargados';
+  show('ciclos-filters');
+  show('citas-upload-section');
+  renderChips();
+  showToast('Ciclos cargados: '+rows.length.toLocaleString()+' filas','success');
+}
+
+// ── CHIPS ──────────────────────────────────────────────
+function renderChips(){
+  const el=document.getElementById('chips-trat');el.innerHTML='';
+  allTrats.forEach(function(item){
+    const btn=document.createElement('button');
+    btn.className='chip'+(activeTrats.has(item)?' on-p':'');
+    btn.textContent=item;
+    btn.onclick=function(){activeTrats.has(item)?activeTrats.delete(item):activeTrats.add(item);renderChips();};
+    el.appendChild(btn);
+  });
+}
+function toggleTrat(t){activeTrats.has(t)?activeTrats.delete(t):activeTrats.add(t);renderChips();}
+
+// ── BUILD PIVOT ────────────────────────────────────────
+function buildPivot(){
+  if(!ciclosRaw.length){showToast('Sube un archivo primero','error');return;}
+
+  // Filter rows: year>=2025, tipo != Externo/blank, trat in activeTrats
+  const filtered=ciclosRaw.filter(function(r){
+    const ym=parseFch(r.fecha_final);
+    if(!ym) return false;
+    const year=parseInt(ym.substring(0,4));
+    if(isNaN(year)||year<2025) return false;
+    // Exclude Externo and blank tipo_paciente
+    const tipo=(r.tipo_paciente||'').trim();
+    if(!tipo || tipo==='Externo') return false;
+    if(!activeTrats.has(r.tratamiento)) return false;
+    return true;
+  });
+
+  if(!filtered.length){showToast('Sin datos con los filtros actuales','error');return;}
+
+  // Build pivot: sede x ym -> Set of his_name
+  const sedeSet=new Set(), ymSet=new Set();
+  const pivot={};  // pivot[sede][ym] = Set of his_name
+
+  filtered.forEach(function(r){
+    const sede=r.del_name_comer||'(Sin sede)';
+    const ym=parseFch(r.fecha_final);
+    if(!ym) return;
+    const name=r.his_name||'';
+    sedeSet.add(sede); ymSet.add(ym);
+    if(!pivot[sede]) pivot[sede]={};
+    if(!pivot[sede][ym]) pivot[sede][ym]=new Set();
+    pivot[sede][ym].add(name);
+  });
+
+  const sedes=[...sedeSet].sort();
+  const yms=[...ymSet].sort();
+  pivotData={sedes,yms,pivot};
+
+  renderPivot(pivotData);
+
+  // Build citas pivot if loaded
+  if(citasRaw.length>0){
+    const cp=buildCitasPivot(yms);
+    renderCitasPivot(cp);
+    document.getElementById('conv-container').innerHTML=buildConversionTable(pivotData, cp);
+  } else {
+    document.getElementById('citas-container').innerHTML='<p style="color:var(--text3);font-size:13px;padding:16px 0;">Sube el archivo de citas para ver esta tabla y la conversión.</p>';
+    document.getElementById('conv-container').innerHTML='';
+  }
+
+  document.getElementById('ciclos-subtitle').textContent=
+    'Excluye: Externo | Tratamientos: '+[...activeTrats].join(', ');
+  show('ciclos-result');
+  showToast('Tablas generadas','success');
+}
+
+function renderPivot(pd){
+  const {sedes,yms,pivot}=pd;
+  let html='<table class="pivot-table"><thead><tr>';
+  html+='<th class="sede-h">Sede</th>';
+  yms.forEach(function(ym){html+='<th>'+ym+'</th>';});
+  html+='<th>Total</th></tr></thead><tbody>';
+
+  // Compute max for heatmap
+  let maxVal=0;
+  sedes.forEach(function(sede){
+    yms.forEach(function(ym){
+      const v=pivot[sede]&&pivot[sede][ym]?pivot[sede][ym].size:0;
+      if(v>maxVal)maxVal=v;
+    });
+  });
+
+  // Column totals
+  const colTotals={};
+  yms.forEach(function(ym){colTotals[ym]=0;});
+  let grandTotal=0;
+
+  sedes.forEach(function(sede){
+    let rowTotal=0;
+    html+='<tr><td class="sede-cell">'+sede+'</td>';
+    yms.forEach(function(ym){
+      const v=pivot[sede]&&pivot[sede][ym]?pivot[sede][ym].size:0;
+      const heat=maxVal>0?Math.ceil((v/maxVal)*5):0;
+      const cls=v===0?'zero':'heat-'+heat;
+      html+='<td class="'+cls+'">'+(v===0?'—':v)+'</td>';
+      rowTotal+=v; colTotals[ym]+=v; grandTotal+=v;
+    });
+    html+='<td style="font-weight:700;color:var(--accent3)">'+rowTotal+'</td></tr>';
+  });
+
+  // Total row
+  html+='<tr class="total-row"><td class="sede-cell">TOTAL</td>';
+  yms.forEach(function(ym){html+='<td>'+colTotals[ym]+'</td>';});
+  html+='<td>'+grandTotal+'</td></tr>';
+  html+='</tbody></table>';
+  document.getElementById('pivot-container').innerHTML=html;
+}
+
+// ── EXPORT CICLOS EXCEL ────────────────────────────────
+function exportCiclosExcel(){
+  if(!pivotData){showToast('Genera la tabla primero','error');return;}
+  const wb=XLSX.utils.book_new();
+  const {sedes,yms,pivot}=pivotData;
+
+  function makeSheet(getData, label){
+    const rows=[['Sede',...yms,'Total']];
+    const colT={}; yms.forEach(function(ym){colT[ym]=0;}); let grand=0;
+    sedes.forEach(function(sede){
+      let rowT=0; const row=[sede];
+      yms.forEach(function(ym){const v=getData(sede,ym);row.push(v);colT[ym]+=v;rowT+=v;});
+      row.push(rowT);grand+=rowT;rows.push(row);
+    });
+    rows.push(['TOTAL',...yms.map(function(ym){return colT[ym];}),grand]);
+    const ws=XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols']=[{wch:36},...yms.map(function(){return{wch:12};}),{wch:12}];
+    XLSX.utils.book_append_sheet(wb,ws,label);
+  }
+
+  // Ciclos sheet
+  makeSheet(function(sede,ym){return pivot[sede]&&pivot[sede][ym]?pivot[sede][ym].size:0;},'Ciclos');
+
+  // Citas sheet
+  if(citasPivotData){
+    const tp=citasPivotData.pivot;
+    makeSheet(function(sede,ym){return tp[sede]&&tp[sede][ym]?tp[sede][ym]:0;},'Citas Primera Vez');
+
+    // Conversion sheet
+    const rows2=[['Sede',...yms,'Total']];
+    const cp=pivot; const colC={}; yms.forEach(function(ym){colC[ym]={ciclos:0,citas:0};});
+    let gCiclos=0,gCitas=0;
+    sedes.forEach(function(sede){
+      const row=[sede]; let rCiclos=0,rCitas=0;
+      yms.forEach(function(ym){
+        const ciclos=cp[sede]&&cp[sede][ym]?cp[sede][ym].size:0;
+        const citas=tp[sede]&&tp[sede][ym]?tp[sede][ym]:0;
+        const conv=citas>0?parseFloat(((ciclos/citas)*100).toFixed(1)):0;
+        row.push(conv); colC[ym].ciclos+=ciclos; colC[ym].citas+=citas; rCiclos+=ciclos; rCitas+=citas;
+      });
+      row.push(rCitas>0?parseFloat(((rCiclos/rCitas)*100).toFixed(1)):0);
+      gCiclos+=rCiclos; gCitas+=rCitas; rows2.push(row);
+    });
+    rows2.push(['TOTAL',...yms.map(function(ym){return colC[ym].citas>0?parseFloat(((colC[ym].ciclos/colC[ym].citas)*100).toFixed(1)):0;}),
+      gCitas>0?parseFloat(((gCiclos/gCitas)*100).toFixed(1)):0]);
+    const ws3=XLSX.utils.aoa_to_sheet(rows2);
+    ws3['!cols']=[{wch:36},...yms.map(function(){return{wch:12};}),{wch:12}];
+    XLSX.utils.book_append_sheet(wb,ws3,'Conversión %');
+  }
+
+  XLSX.writeFile(wb,'Reporte_Ciclos_'+getMonthLabel()+'.xlsx');
+  showToast('Excel descargado','success');
+}
+
+function resetCiclos(){
+  ciclosRaw=[];pivotData=null;citasRaw=[];citasPivotData=null;
+  document.getElementById('ciclos-upload-section').style.display='block';
+  document.getElementById('ciclos-banner').classList.remove('visible');
+  document.getElementById('ciclos-file-input').value='';
+  document.getElementById('citas-banner').classList.remove('visible');
+  document.getElementById('citas-file-input').value='';
+  ['ciclos-filters','ciclos-result','citas-upload-section'].forEach(function(id){document.getElementById(id).classList.remove('visible');});
+  ['citas-container','pivot-container','conv-container'].forEach(function(id){document.getElementById(id).innerHTML='';});
+}
+
+</script>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0D0F14;--surface:#13161D;--surface2:#1A1E28;--surface3:#222736;
+    --border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.12);
+    --accent:#4FEDE2;--accent2:#7B6EF6;--accent3:#F6BE6E;--danger:#F06466;
+    --text:#E8EAF0;--text2:#8B90A0;--text3:#5A5F70;
+    --t1:#4FEDE2;--t2:#9D94F8;--t3:#F06466;--t4:#F6BE6E;
+    --radius:12px;--radius-lg:20px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;min-height:100vh;overflow-x:hidden;}
+  body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+    background:radial-gradient(ellipse 80% 50% at 20% -10%,rgba(79,237,226,.06),transparent 60%),
+               radial-gradient(ellipse 60% 40% at 80% 110%,rgba(123,110,246,.07),transparent 60%);}
+  .app{position:relative;z-index:1;max-width:1200px;margin:0 auto;padding:40px 24px 80px;}
+
+  /* HEADER */
+  .phase-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;
+    background:rgba(123,110,246,.12);border:1px solid rgba(123,110,246,.3);
+    font-size:11px;font-weight:600;color:var(--accent2);letter-spacing:1px;text-transform:uppercase;margin-bottom:16px;}
+  .phase-dot{width:6px;height:6px;border-radius:50%;background:var(--accent2);animation:pulse 2s infinite;}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(1.3)}}
+  .logo-row{display:flex;align-items:center;gap:12px;margin-bottom:6px;}
+  .logo-icon{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:16px;}
+  .logo-text{font-family:'DM Mono',monospace;font-size:12px;font-weight:500;color:var(--text2);letter-spacing:3px;text-transform:uppercase;}
+  h1{font-family:'DM Serif Display',serif;font-size:clamp(2rem,4vw,3.2rem);line-height:1.1;}
+  h1 em{font-style:italic;color:var(--accent);}
+  .subtitle{margin-top:10px;font-size:14px;color:var(--text2);line-height:1.6;max-width:520px;}
+  header{margin-bottom:48px;}
+
+  /* CARD */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:28px;margin-bottom:20px;transition:border-color .2s;}
+  .card:hover{border-color:var(--border2);}
+  .card-title{font-family:'DM Mono',monospace;font-size:10px;font-weight:500;color:var(--text3);letter-spacing:2px;text-transform:uppercase;margin-bottom:16px;}
+
+  /* UPLOAD */
+  .upload-zone{border:2px dashed var(--border2);border-radius:var(--radius-lg);padding:48px 32px;text-align:center;cursor:pointer;transition:all .25s;background:var(--surface);position:relative;overflow:hidden;}
+  .upload-zone::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse 60% 50% at 50% 50%,rgba(79,237,226,.04),transparent);opacity:0;transition:opacity .3s;}
+  .upload-zone:hover,.upload-zone.drag-over{border-color:var(--accent);background:rgba(79,237,226,.04);}
+  .upload-zone:hover::before,.upload-zone.drag-over::before{opacity:1;}
+  .upload-zone.drag-over{transform:scale(1.01);}
+  .upload-icon{font-size:40px;margin-bottom:16px;display:block;}
+  .upload-title{font-family:'DM Serif Display',serif;font-size:1.5rem;margin-bottom:8px;}
+  .upload-sub{font-size:13px;color:var(--text2);margin-bottom:20px;}
+  .upload-cta{display:inline-block;padding:10px 24px;background:linear-gradient(135deg,var(--accent),rgba(79,237,226,.7));color:#0D0F14;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer;}
+  .upload-hint{margin-top:12px;font-size:11px;color:var(--text3);}
+  #file-input{display:none;}
+
+  /* FILE BANNER */
+  .file-banner{display:none;align-items:center;gap:12px;padding:12px 16px;background:rgba(79,237,226,.06);border:1px solid rgba(79,237,226,.2);border-radius:var(--radius);margin-bottom:20px;font-size:13px;}
+  .file-banner.visible{display:flex;}
+  .file-name{font-weight:600;color:var(--accent);font-family:'DM Mono',monospace;}
+  .file-meta{font-size:11px;color:var(--text2);margin-top:2px;}
+  .file-change{margin-left:auto;font-size:12px;color:var(--text2);cursor:pointer;}
+  .file-change:hover{color:var(--danger);}
+
+  /* TAGS */
+  .tags-grid{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
+  .tag{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:8px;background:var(--surface2);border:1px solid var(--border2);font-size:13px;color:var(--text);transition:all .15s;}
+  .tag.at{background:rgba(79,237,226,.12);border-color:rgba(79,237,226,.4);color:var(--t1);}
+  .tag.ap{background:rgba(123,110,246,.12);border-color:rgba(123,110,246,.4);color:var(--t2);}
+  .tag.ar{background:rgba(240,100,102,.12);border-color:rgba(240,100,102,.4);color:var(--t3);}
+  .tag.ag{background:rgba(246,190,110,.12);border-color:rgba(246,190,110,.4);color:var(--t4);}
+  .tag button{background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;line-height:1;padding:0;transition:color .15s;}
+  .tag button:hover{color:var(--danger);}
+
+  /* INPUTS / BUTTONS */
+  .add-row{display:flex;gap:8px;}
+  .input-field{flex:1;background:var(--surface2);border:1px solid var(--border2);color:var(--text);border-radius:8px;padding:10px 14px;font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;outline:none;transition:border-color .2s;}
+  .input-field:focus{border-color:var(--accent);}
+  .input-field::placeholder{color:var(--text3);}
+  .btn{padding:10px 20px;border-radius:8px;border:none;font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;font-size:13px;cursor:pointer;transition:all .15s;}
+  .btn-primary{background:var(--accent);color:#0D0F14;}
+  .btn-primary:hover{box-shadow:0 4px 16px rgba(79,237,226,.35);transform:translateY(-1px);}
+  .btn-secondary{background:var(--surface2);border:1px solid var(--border2);color:var(--text2);}
+  .btn-secondary:hover{color:var(--text);background:var(--surface3);}
+  .btn-purple{background:rgba(123,110,246,.15);border:1px solid rgba(123,110,246,.35);color:var(--t2);}
+  .btn-purple:hover{background:rgba(123,110,246,.25);}
+  .btn-gold{background:rgba(246,190,110,.15);border:1px solid rgba(246,190,110,.35);color:var(--accent3);}
+  .btn-gold:hover{background:rgba(246,190,110,.25);}
+  .btn:disabled{opacity:.4;cursor:not-allowed;transform:none!important;box-shadow:none!important;}
+
+  .section-hidden{display:none;}
+  .section-hidden.visible{display:block;}
+
+  .process-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:16px;}
+  .process-info{font-size:12px;color:var(--text2);}
+  .process-info span{color:var(--accent);font-weight:600;}
+
+  /* EXCLUSION CARD */
+  .excl-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;cursor:pointer;user-select:none;}
+  .excl-toggle{font-size:12px;color:var(--text3);}
+  .excl-body.collapsed{display:none;}
+  .excl-label{font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px;display:flex;align-items:center;gap:6px;}
+  .excl-dot{width:8px;height:8px;border-radius:50%;}
+
+  /* LOADING */
+  .loading{display:none;text-align:center;padding:48px;}
+  .loading.visible{display:block;}
+  .spinner{width:40px;height:40px;border:3px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px;}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* RESULTS */
+  .results{display:none;}
+  .results.visible{display:block;}
+
+  /* STATS */
+  .stats-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px;}
+  .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;}
+  .stat-label{font-size:11px;color:var(--text3);letter-spacing:1px;text-transform:uppercase;font-family:'DM Mono',monospace;margin-bottom:8px;}
+  .stat-value{font-family:'DM Serif Display',serif;font-size:1.6rem;}
+  .stat-value.c1{color:var(--t1);}.stat-value.c2{color:var(--t2);}.stat-value.c3{color:var(--t3);}
+
+  /* 3-TABLE TABS */
+  .table-tabs-row{display:flex;gap:4px;margin-bottom:20px;background:var(--surface2);border-radius:12px;padding:4px;border:1px solid var(--border);}
+  .table-tab{flex:1;padding:10px 12px;border-radius:8px;border:none;background:transparent;color:var(--text2);font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;font-size:12px;cursor:pointer;transition:all .2s;text-align:center;}
+  .table-tab:hover{color:var(--text);}
+  .table-tab.at1{background:rgba(79,237,226,.15);color:var(--t1);box-shadow:0 0 0 1px rgba(79,237,226,.3);}
+  .table-tab.at2{background:rgba(123,110,246,.15);color:var(--t2);box-shadow:0 0 0 1px rgba(123,110,246,.3);}
+  .table-tab.at3{background:rgba(240,100,102,.15);color:var(--t3);box-shadow:0 0 0 1px rgba(240,100,102,.3);}
+  .table-tab.at4{background:rgba(246,190,110,.15);color:var(--t4);box-shadow:0 0 0 1px rgba(246,190,110,.3);}
+  .table-desc{font-size:12px;color:var(--text2);margin-bottom:16px;padding:10px 14px;border-radius:8px;background:var(--surface2);border-left:3px solid var(--border2);}
+  .table-desc.d1{border-left-color:var(--t1);}.table-desc.d2{border-left-color:var(--t2);}.table-desc.d3{border-left-color:var(--t3);}.table-desc.d4{border-left-color:var(--t4);}
+
+  /* DOC TABS */
+  .doc-tabs-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border);}
+  .doc-tab{padding:7px 14px;border-radius:8px;border:1px solid var(--border2);background:var(--surface2);color:var(--text2);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;white-space:nowrap;}
+  .doc-tab:hover{color:var(--text);}
+  .doc-tab.active{background:rgba(79,237,226,.12);border-color:rgba(79,237,226,.4);color:var(--t1);}
+  .doc-tab.no-data{opacity:.35;}
+
+  /* SEARCH */
+  .search-row{display:flex;gap:10px;margin-bottom:16px;}
+  .search-field{background:var(--surface2);border:1px solid var(--border2);color:var(--text);border-radius:8px;padding:8px 14px;font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;outline:none;transition:border-color .2s;width:260px;}
+  .search-field:focus{border-color:var(--accent);}
+  .search-field::placeholder{color:var(--text3);}
+
+  /* TABLE */
+  .table-wrap{overflow-x:auto;}
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  thead th{background:var(--surface2);color:var(--text2);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:12px 16px;text-align:left;border-bottom:1px solid var(--border2);font-weight:500;white-space:nowrap;}
+  thead th.num{text-align:right;}
+  tbody tr{border-bottom:1px solid var(--border);transition:background .1s;}
+  tbody tr:hover{background:var(--surface2);}
+  tbody td{padding:11px 16px;color:var(--text);vertical-align:middle;}
+  tbody td.num{text-align:right;font-family:'DM Mono',monospace;font-size:12px;}
+  tbody td.muted{color:var(--text2);}
+  .total-row td{background:var(--surface2);font-weight:700;font-family:'DM Mono',monospace;font-size:13px;border-top:2px solid rgba(255,255,255,.1);padding:14px 16px;}
+  .total-row.c1 td{color:var(--t1);border-top-color:rgba(79,237,226,.3);}
+  .total-row.c2 td{color:var(--t2);border-top-color:rgba(123,110,246,.3);}
+  .total-row.c3 td{color:var(--t3);border-top-color:rgba(240,100,102,.3);}
+  .total-row.c4 td{color:var(--t4);border-top-color:rgba(246,190,110,.3);}
+
+  /* EXPORT */
+  .export-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:20px;}
+  .export-label{font-size:11px;color:var(--text3);letter-spacing:1px;text-transform:uppercase;font-family:'DM Mono',monospace;margin-right:4px;}
+
+  /* SCROLLBAR */
+  ::-webkit-scrollbar{width:6px;height:6px;}
+  ::-webkit-scrollbar-track{background:var(--surface);}
+  ::-webkit-scrollbar-thumb{background:var(--surface3);border-radius:3px;}
+
+  /* VALIDATION */
+  .val-bar{display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:10px;font-size:12px;flex-wrap:wrap;}
+  .val-ok{background:rgba(79,237,226,.08);border:1px solid rgba(79,237,226,.3);color:var(--t1);}
+  .val-err{background:rgba(240,100,102,.08);border:1px solid rgba(240,100,102,.3);color:var(--t3);}
+  .val-eq{font-family:"DM Mono",monospace;font-size:11px;color:var(--text2);margin-left:auto;}
+  .val-eq span{color:var(--text);font-weight:600;}
+
+  /* TOAST */
+  .toast{position:fixed;bottom:24px;right:24px;z-index:9999;padding:12px 20px;border-radius:10px;background:var(--surface3);border:1px solid var(--border2);font-size:13px;transform:translateY(80px);opacity:0;transition:all .3s;pointer-events:none;max-width:300px;}
+  .toast.show{transform:translateY(0);opacity:1;}
+  .toast.success{border-color:rgba(79,237,226,.4);color:var(--t1);}
+  .toast.error{border-color:rgba(240,100,102,.4);color:var(--danger);}
+
+  /* NAV */
+  .main-nav{display:flex;gap:4px;margin-bottom:40px;background:var(--surface2);border-radius:14px;padding:5px;border:1px solid var(--border);}
+  .nav-btn{flex:1;padding:12px 16px;border-radius:10px;border:none;background:transparent;color:var(--text2);font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s;text-align:center;}
+  .nav-btn:hover{color:var(--text);}
+  .nav-btn.active{background:var(--surface3);color:var(--text);box-shadow:0 2px 8px rgba(0,0,0,.3);}
+
+  /* SECTION PAGES */
+  .page{display:none;}.page.active{display:block;}
+
+  /* CICLOS TABLE */
+  .pivot-wrap{overflow-x:auto;margin-top:4px;}
+  #citas-container,#pivot-container,#conv-container{overflow-x:auto;}
+  .pivot-table{width:auto;border-collapse:collapse;font-size:12px;min-width:600px;}
+  .pivot-table th{background:var(--surface2);color:var(--text2);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:10px 14px;text-align:center;border:1px solid var(--border2);white-space:nowrap;font-weight:500;}
+  .pivot-table th.sede-h{text-align:left;min-width:200px;}
+  .pivot-table td{padding:10px 14px;border:1px solid var(--border);text-align:center;font-family:'DM Mono',monospace;font-size:12px;color:var(--text);}
+  .pivot-table td.sede-cell{text-align:left;color:var(--text2);font-family:'Plus Jakarta Sans',sans-serif;font-size:12px;font-weight:600;}
+  .pivot-table tr:hover td{background:var(--surface2);}
+  .pivot-table td.zero{color:var(--text3);}
+  .pivot-table tr.total-row td{background:var(--surface2);font-weight:700;color:var(--t1);border-top:2px solid rgba(79,237,226,.3);}
+  .pivot-table tr.total-row td.sede-cell{color:var(--t1);}
+  .heat-1{background:rgba(79,237,226,.04);}
+  .heat-2{background:rgba(79,237,226,.08);}
+  .heat-3{background:rgba(79,237,226,.14);}
+  .heat-4{background:rgba(79,237,226,.22);}
+  .heat-5{background:rgba(79,237,226,.32);}
+
+  /* CICLOS FILTERS */
+  .filter-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px;align-items:center;}
+  .filter-label{font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;letter-spacing:1px;text-transform:uppercase;white-space:nowrap;}
+  .filter-chips{display:flex;gap:6px;flex-wrap:wrap;}
+  .chip{padding:5px 12px;border-radius:6px;border:1px solid var(--border2);background:var(--surface2);color:var(--text2);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;}
+  .chip:hover{color:var(--text);}
+  .chip.on{background:rgba(79,237,226,.12);border-color:rgba(79,237,226,.4);color:var(--t1);}
+  .chip.on-p{background:rgba(123,110,246,.12);border-color:rgba(123,110,246,.4);color:var(--t2);}
+
+
+  /* CITAS & CONVERSION */
+  .pivot-section-title{font-family:'DM Mono',monospace;font-size:10px;font-weight:500;color:var(--text3);letter-spacing:2px;text-transform:uppercase;margin-bottom:12px;margin-top:24px;padding-top:24px;border-top:1px solid var(--border);}
+  .pivot-section-title:first-child{margin-top:0;padding-top:0;border-top:none;}
+  .conv-cell{color:var(--accent3);font-weight:700;}
+  .pivot-table td.conv-hi{background:rgba(246,190,110,.15);color:var(--accent3);font-weight:700;}
+  .pivot-table th.conv-h{color:var(--accent3);}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="main-nav">
+    <button class="nav-btn active" id="nav-ventas" onclick="switchPage('ventas')">💰 Ventas por Dr</button>
+    <button class="nav-btn" id="nav-ciclos" onclick="switchPage('ciclos')">📊 Conversión</button>
+    <button class="nav-btn" id="nav-xdoc" onclick="switchPage('xdoc')">👨‍⚕️ Conversión por Doctor</button>
+  </nav>
+  <div class="page active" id="page-ventas">
+
+  <header>
+    <div class="phase-badge"><span class="phase-dot"></span>Fase 2 — Tablas Filtradas</div>
+    <div class="logo-row">
+      <div class="logo-icon">⚕</div>
+      <div class="logo-text">Sistema de Reportes</div>
+    </div>
+    <h1>Reporte de <em>Ventas</em><br>por Doctor</h1>
+    <p class="subtitle">Sube el archivo, configura doctores y filtros. Obtén 3 vistas automáticas con exportación a Excel y PDF.</p>
+  </header>
+
+  <!-- UPLOAD -->
+  <div id="upload-section">
+    <div class="upload-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+      <span class="upload-icon">📂</span>
+      <div class="upload-title">Sube tu archivo de datos</div>
+      <div class="upload-sub">Arrastra y suelta aquí, o haz clic para buscar</div>
+      <div class="upload-cta">Seleccionar archivo</div>
+      <div class="upload-hint">Compatible: .xlsx, .xls, .csv</div>
+    </div>
+    <input type="file" id="file-input" accept=".xlsx,.xls,.csv">
+  </div>
+
+  <!-- FILE BANNER -->
+  <div class="file-banner" id="file-banner">
+    <span style="font-size:20px">✅</span>
+    <div>
+      <div class="file-name" id="banner-name"></div>
+      <div class="file-meta" id="banner-meta"></div>
+    </div>
+    <div class="file-change" onclick="resetFile()">Cambiar archivo</div>
+  </div>
+
+  <!-- DOCTORS -->
+  <div class="card section-hidden" id="doctors-section">
+    <div class="card-title">Doctores a incluir</div>
+    <div class="tags-grid" id="doctors-grid"></div>
+    <div class="add-row">
+      <input type="text" class="input-field" id="new-doctor" placeholder="Buscar y agregar doctor..." list="doctors-list">
+      <datalist id="doctors-list"></datalist>
+      <button class="btn btn-secondary" onclick="addDoctor()">+ Agregar</button>
+    </div>
+  </div>
+
+  <!-- EXCLUSIONS -->
+  <div class="card section-hidden" id="exclusion-section">
+    <div class="excl-header" onclick="toggleExclusion()">
+      <div class="card-title" style="margin-bottom:0">⚙ Filtros de exclusión — Tablas 2 y 3</div>
+      <div class="excl-toggle" id="excl-toggle">▲ Ocultar</div>
+    </div>
+    <div class="excl-body" id="excl-body">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:14px;">
+        Productos que contengan estas palabras: se <strong style="color:var(--t3)">quitan</strong> de la Tabla 2 y aparecen <strong style="color:var(--t2)">solos</strong> en la Tabla 3.
+      </p>
+      <div class="excl-label"><span class="excl-dot" style="background:var(--t3)"></span>Palabras activas</div>
+      <div class="tags-grid" id="excl-tags"></div>
+      <div class="add-row">
+        <input type="text" class="input-field" id="new-excl" placeholder="Ej: almacenamiento, citas, check up...">
+        <button class="btn btn-secondary" onclick="addExclusion()">+ Agregar</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- OVODONACION -->
+  <div class="card section-hidden" id="ovodo-section">
+    <div class="excl-header" onclick="toggleOvodo()">
+      <div class="card-title" style="margin-bottom:0">🥚 Palabras clave — Ovodonación (Tabla 4)</div>
+      <div class="excl-toggle" id="ovodo-toggle">▲ Ocultar</div>
+    </div>
+    <div class="excl-body" id="ovodo-body">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:14px;">
+        Productos que contengan estas palabras aparecen en <strong style="color:var(--t3)">T3</strong> (junto con los demás excluidos) y también solos en <strong style="color:var(--t4)">T4</strong>. La validación <strong>T2 + T3 = T1</strong> se mantiene.
+      </p>
+      <div class="excl-label"><span class="excl-dot" style="background:var(--t4)"></span>Palabras activas</div>
+      <div class="tags-grid" id="ovodo-tags"></div>
+      <div class="add-row">
+        <input type="text" class="input-field" id="new-ovodo" placeholder="Ej: ovodonacion, donadora...">
+        <button class="btn btn-secondary" onclick="addOvodo()">+ Agregar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- GENERATE -->
+  <div class="section-hidden" id="generate-section">
+    <div class="process-row">
+      <button class="btn btn-primary" id="process-btn" onclick="processData()">Generar Reporte</button>
+      <div class="process-info" id="process-info"></div>
+    </div>
+  </div>
+
+  <!-- LOADING -->
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <div style="font-size:13px;color:var(--text2)">Procesando datos...</div>
+  </div>
+
+  <!-- RESULTS -->
+  <div class="results" id="results">
+    <div class="stats-bar" id="stats-bar"></div>
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;">
+        <div class="card-title" style="margin-bottom:0">Resultados</div>
+        <div class="export-bar">
+          <span class="export-label">Exportar</span>
+          <button class="btn btn-purple" onclick="exportExcel()">📊 Excel</button>
+          <button class="btn btn-gold"   onclick="exportPDF()">📄 PDF</button>
+        </div>
+      </div>
+
+      <!-- 3-TABLE TABS -->
+      <div class="table-tabs-row">
+        <button class="table-tab" id="ttab-1" onclick="switchTableTab(1)">📋 Tabla 1 — Todos</button>
+        <button class="table-tab" id="ttab-2" onclick="switchTableTab(2)">✅ Tabla 2 — Sin exclusiones</button>
+        <button class="table-tab" id="ttab-3" onclick="switchTableTab(3)">🚫 Tabla 3 — Excluidos + Ovodo</button>
+        <button class="table-tab" id="ttab-4" onclick="switchTableTab(4)">🥚 Tabla 4 — Solo Ovodonación</button>
+      </div>
+
+      <div class="table-desc" id="table-desc"></div>
+      <div id="validation-bar" style="display:none;margin-bottom:16px;"></div>
+
+      <!-- DOCTOR TABS -->
+      <div class="doc-tabs-row" id="doc-tabs-row"></div>
+
+      <!-- SEARCH -->
+      <div class="search-row">
+        <input type="text" class="search-field" id="search-input" placeholder="Buscar producto..." oninput="renderTable()">
+        <button class="btn btn-secondary" onclick="document.getElementById('search-input').value='';renderTable()">✕</button>
+        <button class="btn btn-secondary" id="sort-btn" onclick="toggleSort()" title="Ordenar por Total sin IVA">↕ Ordenar</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Producto</th>
+            <th class="num">Cantidad</th>
+            <th class="num">Total sin IVA</th>
+          </tr></thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+
+  </div><!-- end page-ventas -->
+
+  <!-- ═══ CICLOS PAGE ═══ -->
+  <div class="page" id="page-ciclos">
+    <header style="margin-bottom:36px;">
+      <div class="phase-badge" style="background:rgba(123,110,246,.12);border-color:rgba(123,110,246,.3);color:var(--t2);"><span class="phase-dot" style="background:var(--t2)"></span>Conversión</div>
+      <div class="logo-row"><div class="logo-icon">🔬</div><div class="logo-text">Sistema de Reportes</div></div>
+      <h1><em style="color:var(--t2)">Conversión</em><br>por Sede</h1>
+      <p class="subtitle">Sube el archivo de ciclos. Filas = Sede, Columnas = Año-Mes, Valores = pacientes únicos (his_name).</p>
+    </header>
+
+    <!-- Upload ciclos -->
+    <div id="ciclos-upload-section">
+      <div class="upload-zone" id="ciclos-drop-zone" onclick="document.getElementById('ciclos-file-input').click()">
+        <span class="upload-icon">📂</span>
+        <div class="upload-title">Sube el archivo de ciclos</div>
+        <div class="upload-sub">conteo_ciclos.csv / .xlsx</div>
+        <div class="upload-cta">Seleccionar archivo</div>
+        <div class="upload-hint">Compatible: .csv, .xlsx</div>
+      </div>
+      <input type="file" id="ciclos-file-input" accept=".csv,.xlsx,.xls" style="display:none">
+    </div>
+
+    <!-- Banner -->
+    <div class="file-banner" id="ciclos-banner">
+      <span style="font-size:20px">✅</span>
+      <div><div class="file-name" id="ciclos-banner-name"></div><div class="file-meta" id="ciclos-banner-meta"></div></div>
+      <div class="file-change" onclick="resetCiclos()">Cambiar archivo</div>
+    </div>
+
+
+    <!-- Upload citas -->
+    <div id="citas-upload-section" class="section-hidden" style="margin-top:20px;">
+      <div class="upload-zone" id="citas-drop-zone" onclick="document.getElementById('citas-file-input').click()" style="padding:32px;">
+        <span class="upload-icon" style="font-size:28px;">📅</span>
+        <div class="upload-title" style="font-size:1.1rem;">Sube el archivo de citas</div>
+        <div class="upload-sub">citas.csv / .xlsx</div>
+        <div class="upload-cta">Seleccionar archivo</div>
+      </div>
+      <input type="file" id="citas-file-input" accept=".csv,.xlsx,.xls" style="display:none">
+    </div>
+    <div class="file-banner" id="citas-banner" style="margin-top:12px;">
+      <span style="font-size:20px">📅</span>
+      <div><div class="file-name" id="citas-banner-name"></div><div class="file-meta" id="citas-banner-meta"></div></div>
+      <div class="file-change" onclick="resetCitas()">Cambiar</div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card section-hidden" id="ciclos-filters">
+      <div class="card-title">Filtros</div>
+
+      <div class="filter-row">
+        <span class="filter-label">Tratamiento (ciclos)</span>
+        <div class="filter-chips" id="chips-trat"></div>
+      </div>
+
+      <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-primary" onclick="buildPivot()">Generar tablas</button>
+        <button class="btn btn-secondary" onclick="exportCiclosExcel()">📊 Excel</button>
+      </div>
+    </div>
+
+    <!-- Pivot result -->
+    <div class="card section-hidden" id="ciclos-result">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+        <div class="card-title" style="margin-bottom:0">Tabla de Ciclos — Sede × Mes</div>
+        <div style="font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;" id="ciclos-subtitle"></div>
+      </div>
+      <div class="pivot-wrap" style="overflow-x:visible;">
+        <div class="pivot-section-title">Citas Primera Vez — Terminadas</div>
+        <div id="citas-container"></div>
+        <div class="pivot-section-title" style="margin-top:32px;">Conteo de Ciclos (FIV / Vitri de Ovulos)</div>
+        <div id="pivot-container"></div>
+        <div class="pivot-section-title" style="margin-top:32px;">Conversión — Ciclos ÷ Citas (×100)</div>
+        <div id="conv-container"></div>
+      </div>
+    </div>
+  </div><!-- end page-ciclos -->
+  <!-- ═══ XDOC PAGE ═══ -->
+  <div class="page" id="page-xdoc">
+    <header style="margin-bottom:36px;">
+      <div class="phase-badge" style="background:rgba(246,190,110,.12);border-color:rgba(246,190,110,.3);color:var(--t4);"><span class="phase-dot" style="background:var(--t4)"></span>Conversión por Doctor</div>
+      <div class="logo-row"><div class="logo-icon">👨‍⚕️</div><div class="logo-text">Sistema de Reportes</div></div>
+      <h1>Conversión por <em style="color:var(--t4)">Doctor</em></h1>
+      <p class="subtitle">Mismos datos que Conversión, pero las filas son los doctores con información en el período seleccionado.</p>
+    </header>
+
+    <div class="card" id="xdoc-info-card">
+      <div class="card-title">Requisito</div>
+      <p style="font-size:13px;color:var(--text2);">Genera primero las tablas en la pestaña <strong style="color:var(--t2)">Conversión</strong> para ver los datos aquí.</p>
+    </div>
+
+    <div class="card section-hidden" id="xdoc-result">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:10px;">
+        <div class="card-title" style="margin-bottom:0">Conversión — Doctor × Mes</div>
+        <button class="btn btn-secondary" onclick="exportXdocExcel()">📊 Excel</button>
+      </div>
+      <div class="pivot-section-title" style="padding-top:0;border-top:none;margin-top:0;">Citas Primera Vez — Terminadas por Doctor</div>
+      <div id="xdoc-citas-container" style="overflow-x:auto;margin-bottom:32px;"></div>
+      <div class="pivot-section-title">Ciclos por Doctor</div>
+      <div id="xdoc-ciclos-container" style="overflow-x:auto;margin-bottom:32px;"></div>
+      <div class="pivot-section-title">Conversión % por Doctor</div>
+      <div id="xdoc-conv-container" style="overflow-x:auto;"></div>
+    </div>
+  </div><!-- end page-xdoc -->
+
+
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ── STATE ──────────────────────────────────────────────
+let rawData=[], allDoctors=[], selectedDoctors=[];
+let exclusionWords=['almacenamiento','citas','check up'];
+let ovodoWords=['ovodonacion','donadora'];
+let groupedAll={}, groupedClean={}, groupedExcl={}, groupedOvodo={};
+let sortMode=0; // 0=default, 1=mayor a menor, 2=menor a mayor
+let currentTableTab=1, currentDoctor='all';
+let COL={doctor:'',product:'',total:''};
+
+const DEFAULT_DOCTORS=[
+  'carlos alejandro parra vargas',
+  'eugenia morán orozco','eugenia moran orozco',
+  'giovanni lópez salamanca','giovanni lopez salamanca',
+  'guadalupe nolazco beltrán','guadalupe nolazco beltran',
+  'jaime antonio hidalgo carrera',
+  'jairo hernando pedraza pinto',
+  'ruben gonzalez ruiz'
+];
+
+// ── UPLOAD ─────────────────────────────────────────────
+const dropZone=document.getElementById('drop-zone');
+const fileInput=document.getElementById('file-input');
+dropZone.addEventListener('dragover',e=>{e.preventDefault();dropZone.classList.add('drag-over');});
+dropZone.addEventListener('dragleave',()=>dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remove('drag-over');if(e.dataTransfer.files[0])handleFile(e.dataTransfer.files[0]);});
+fileInput.addEventListener('change',e=>{if(e.target.files[0])handleFile(e.target.files[0]);});
+
+function handleFile(file){
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const wb=XLSX.read(e.target.result,{type:'array',cellDates:true});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      rawData=XLSX.utils.sheet_to_json(ws,{defval:''});
+      if(!rawData.length){showToast('Archivo vacío','error');return;}
+      detectColumns(Object.keys(rawData[0]));
+      allDoctors=[...new Set(rawData.map(r=>norm(r[COL.doctor])).filter(Boolean))].sort();
+      selectedDoctors=allDoctors.filter(d=>DEFAULT_DOCTORS.some(def=>d.includes(def)||def.includes(d)));
+      document.getElementById('upload-section').style.display='none';
+      document.getElementById('file-banner').classList.add('visible');
+      document.getElementById('banner-name').textContent=file.name;
+      document.getElementById('banner-meta').textContent=`${rawData.length.toLocaleString()} registros · ${allDoctors.length} profesionales`;
+      show('doctors-section');show('exclusion-section');show('ovodo-section');show('generate-section');
+      renderDoctors();renderExclusions();renderOvodo();updateProcessInfo();
+      showToast(`Archivo cargado · ${rawData.length.toLocaleString()} filas`,'success');
+    }catch(err){showToast('Error: '+err.message,'error');}
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function detectColumns(keys){
+  const lo=k=>k.toLowerCase().trim();
+  const lk=keys.map(lo);
+  COL.doctor=keys[lk.findIndex(k=>k==='profesional')]||keys[lk.findIndex(k=>k.includes('profesional'))]||keys[0];
+  const np=lk.findIndex(k=>k.includes('nombre prod'));
+  const pp=lk.findIndex(k=>k==='producto');
+  COL.product=np!==-1?keys[np]:(pp!==-1?keys[pp]:keys[1]);
+  const tv=lk.findIndex(k=>k.includes('total venta')&&!k.includes('iva'));
+  COL.total=tv!==-1?keys[tv]:(keys[lk.findIndex(k=>k.includes('total')&&!k.includes('iva'))]||keys[2]);
+}
+
+// ── DOCTORS ────────────────────────────────────────────
+function renderDoctors(){
+  const grid=document.getElementById('doctors-grid');
+  const list=document.getElementById('doctors-list');
+  grid.innerHTML='';list.innerHTML='';
+  selectedDoctors.forEach(doc=>{
+    const t=document.createElement('div');t.className='tag at';
+    t.innerHTML=`<span>${title(doc)}</span><button onclick="removeDoctor('${esc(doc)}')">×</button>`;
+    grid.appendChild(t);
+  });
+  allDoctors.forEach(doc=>{const o=document.createElement('option');o.value=title(doc);list.appendChild(o);});
+}
+function addDoctor(){
+  const inp=document.getElementById('new-doctor');const v=norm(inp.value);if(!v)return;
+  const match=allDoctors.find(d=>norm(d)===v||d.includes(v)||norm(title(d))===norm(inp.value));
+  if(!match){showToast('Doctor no encontrado','error');return;}
+  if(selectedDoctors.includes(match)){showToast('Ya está en la lista','error');return;}
+  selectedDoctors.push(match);inp.value='';renderDoctors();updateProcessInfo();
+}
+function removeDoctor(doc){selectedDoctors=selectedDoctors.filter(d=>d!==doc);renderDoctors();updateProcessInfo();}
+
+
+// ── OVODONACION ────────────────────────────────────────
+function renderOvodo(){
+  const grid=document.getElementById('ovodo-tags');grid.innerHTML='';
+  ovodoWords.forEach(function(w){
+    const t=document.createElement('div');t.className='tag ag';
+    const span=document.createElement('span');span.textContent=w;
+    const btn=document.createElement('button');btn.textContent='x';
+    btn.addEventListener('click',function(){removeOvodo(w);});
+    t.appendChild(span);t.appendChild(btn);
+    grid.appendChild(t);
+  });
+}
+function addOvodo(){
+  const inp=document.getElementById('new-ovodo');const v=inp.value.trim().toLowerCase();if(!v)return;
+  if(ovodoWords.includes(v)){showToast('Ya existe','error');return;}
+  ovodoWords.push(v);inp.value='';renderOvodo();updateProcessInfo();
+}
+function removeOvodo(w){ovodoWords=ovodoWords.filter(function(x){return x!==w;});renderOvodo();}
+function isOvodo(prod){const p=prod.toLowerCase();return ovodoWords.some(function(w){return p.includes(w);});}
+function toggleOvodo(){
+  const b=document.getElementById('ovodo-body');const t=document.getElementById('ovodo-toggle');
+  b.classList.toggle('collapsed');t.textContent=b.classList.contains('collapsed')?'▼ Mostrar':'▲ Ocultar';
+}
+
+// ── EXCLUSIONS ─────────────────────────────────────────
+function renderExclusions(){
+  const grid=document.getElementById('excl-tags');grid.innerHTML='';
+  exclusionWords.forEach(w=>{
+    const t=document.createElement('div');t.className='tag ar';
+    t.innerHTML=`<span>${w}</span><button onclick="removeExclusion('${esc(w)}')">×</button>`;
+    grid.appendChild(t);
+  });
+}
+function addExclusion(){
+  const inp=document.getElementById('new-excl');const v=inp.value.trim().toLowerCase();if(!v)return;
+  if(exclusionWords.includes(v)){showToast('Ya existe','error');return;}
+  exclusionWords.push(v);inp.value='';renderExclusions();updateProcessInfo();
+}
+function removeExclusion(w){exclusionWords=exclusionWords.filter(x=>x!==w);renderExclusions();}
+function isExcluded(prod){const p=prod.toLowerCase();return exclusionWords.some(w=>p.includes(w));}
+function toggleExclusion(){
+  const b=document.getElementById('excl-body');const t=document.getElementById('excl-toggle');
+  b.classList.toggle('collapsed');t.textContent=b.classList.contains('collapsed')?'▼ Mostrar':'▲ Ocultar';
+}
+function updateProcessInfo(){
+  const btn=document.getElementById('process-btn');const info=document.getElementById('process-info');
+  if(!selectedDoctors.length){info.innerHTML='<span style="color:var(--danger)">Selecciona al menos un doctor</span>';btn.disabled=true;return;}
+  const count=rawData.filter(r=>matchesDoc(norm(r[COL.doctor]))).length;
+  info.innerHTML=`<span>${selectedDoctors.length}</span> doctores · <span>${count.toLocaleString()}</span> registros · <span>${exclusionWords.length}</span> filtros`;
+  btn.disabled=false;
+}
+function matchesDoc(d){return selectedDoctors.some(sel=>d===sel||d.includes(sel)||sel.includes(d));}
+
+// ── PROCESS ────────────────────────────────────────────
+function processData(){
+  document.getElementById('loading').classList.add('visible');
+  document.getElementById('results').classList.remove('visible');
+  setTimeout(()=>{
+    groupedAll={};groupedClean={};groupedExcl={};groupedOvodo={};let totalRows=0;
+    rawData.forEach(row=>{
+      const dn=norm(row[COL.doctor]);
+      const matched=selectedDoctors.find(sel=>dn===sel||dn.includes(sel)||sel.includes(dn));
+      if(!matched)return;
+      const prod=(row[COL.product]||'').toString().trim()||'(Sin nombre)';
+      const total=parseFloat(row[COL.total])||0;
+      const excl=isExcluded(prod);
+      const ovodo=isOvodo(prod);
+      const add=(obj,key)=>{if(!obj[matched])obj[matched]={};if(!obj[matched][key])obj[matched][key]={qty:0,total:0};obj[matched][key].qty++;obj[matched][key].total+=total;};
+      add(groupedAll,prod);
+      if(!excl && !ovodo) add(groupedClean,prod);   // T2: clean only
+      if(excl || ovodo)   add(groupedExcl,prod);    // T3: excl + ovodo
+      if(ovodo)           add(groupedOvodo,prod);   // T4: ovodo only
+      totalRows++;
+    });
+    document.getElementById('loading').classList.remove('visible');
+    if(!totalRows){showToast('Sin registros','error');return;}
+    currentTableTab=1;currentDoctor='all';
+    renderStats(totalRows);renderTableTabs();renderDocTabs();renderValidation();renderTable();
+    document.getElementById('results').classList.add('visible');
+    showToast('Reporte generado','success');
+    document.getElementById('results').scrollIntoView({behavior:'smooth',block:'start'});
+  },300);
+}
+
+// ── STATS ──────────────────────────────────────────────
+function renderStats(totalRows){
+  const sum=d=>Object.values(d).reduce((s,p)=>s+Object.values(p).reduce((ss,x)=>ss+x.total,0),0);
+  document.getElementById('stats-bar').innerHTML=`
+    <div class="stat-card"><div class="stat-label">Total registros</div><div class="stat-value">${totalRows.toLocaleString()}</div></div>
+    <div class="stat-card"><div class="stat-label">Tabla 1 — Todos</div><div class="stat-value c1">${fmt(sum(groupedAll))}</div></div>
+    <div class="stat-card"><div class="stat-label">Tabla 2 — Sin exclusiones</div><div class="stat-value c2">${fmt(sum(groupedClean))}</div></div>
+    <div class="stat-card"><div class="stat-label">Tabla 3 — Excl+Ovodo</div><div class="stat-value c3">${fmt(sum(groupedExcl))}</div></div>
+    <div class="stat-card"><div class="stat-label">Tabla 4 — Ovodonacion</div><div class="stat-value" style="color:var(--t4)">${fmt(sum(groupedOvodo))}</div></div>`;
+}
+
+// ── TABLE TABS ─────────────────────────────────────────
+function switchTableTab(n){currentTableTab=n;document.getElementById('search-input').value='';renderTableTabs();renderDocTabs();renderValidation();renderTable();}
+function renderTableTabs(){
+  const classes=['at1','at2','at3','at4'];
+  [1,2,3,4].forEach(n=>{
+    const btn=document.getElementById(`ttab-${n}`);
+    btn.className='table-tab'+(currentTableTab===n?' '+classes[n-1]:'');
+  });
+  const ew=exclusionWords.map(w=>'"'+w+'"').join(', ')||'(ninguno)';
+  const ow=ovodoWords.map(w=>'"'+w+'"').join(', ')||'(ninguno)';
+  const descs=[
+    {c:'d1',t:'Todos los productos de los doctores seleccionados, sin ningun filtro.'},
+    {c:'d2',t:'Productos <strong>excluyendo</strong>: '+ew+' y ovodonacion: '+ow+'.'},
+    {c:'d3',t:'Excluidos ('+ew+') <strong>mas</strong> Ovodonacion ('+ow+').'},
+    {c:'d4',t:'<strong>Unicamente</strong> productos de Ovodonacion: '+ow+'.'},
+  ];
+  const d=descs[currentTableTab-1]||descs[0];
+  const el=document.getElementById('table-desc');
+  el.className='table-desc '+d.c;el.innerHTML=d.t;
+}
+
+// ── DOC TABS ───────────────────────────────────────────
+function renderValidation(){
+  const bar=document.getElementById("validation-bar");
+  if(currentTableTab!==3 && currentTableTab!==4){bar.style.display="none";return;}
+  const sumDoc=function(data,doc){
+    const docs=doc==="all"?Object.keys(data):[doc];
+    return docs.reduce(function(s,d){return s+Object.values(data[d]||{}).reduce(function(ss,p){return ss+p.total;},0);},0);
+  };
+  const t1=sumDoc(groupedAll,currentDoctor);
+  const t2=sumDoc(groupedClean,currentDoctor);
+  const t3=sumDoc(groupedExcl,currentDoctor);
+  const t4=sumDoc(groupedOvodo,currentDoctor);
+  const sum23=t2+t3;
+  const diff=Math.abs(t1-sum23);
+  const ok=diff<0.01;
+  const cls=ok?"val-ok":"val-err";
+  const icon=ok?"&#10003; Validacion correcta":"&#9888; Diferencia detectada";
+  const eq=ok?"=":"&#8800;";
+  const diffPart=ok?"":"&nbsp;&middot;&nbsp;Diferencia: <span style='color:var(--t3)'>"+fmt(diff)+"</span>";
+  const t4note=" &nbsp;<span style='color:var(--t4);font-size:10px'>(T4 Ovodo: "+fmt(t4)+" — subconjunto de T3)</span>";
+  bar.style.display="block";
+  bar.innerHTML="<div class='val-bar "+cls+"'><span>"+icon+"</span><span class='val-eq'>T2 <span>"+fmt(t2)+"</span> + T3 <span>"+fmt(t3)+"</span> = <span>"+fmt(sum23)+"</span> "+eq+" T1 <span>"+fmt(t1)+"</span>"+diffPart+t4note+"</span></div>";
+}
+
+
+function renderCitasPivot(pd){
+  const {sedes,yms,pivot}=pd;
+  let html='<table class="pivot-table"><thead><tr>';
+  html+='<th class="sede-h">Sede</th>';
+  yms.forEach(function(ym){html+='<th>'+ym+'</th>';});
+  html+='<th>Total</th></tr></thead><tbody>';
+  let grandTotal=0;
+  const colTotals={};yms.forEach(function(ym){colTotals[ym]=0;});
+  sedes.forEach(function(sede){
+    let rowT=0;
+    html+='<tr><td class="sede-cell">'+sede+'</td>';
+    yms.forEach(function(ym){
+      const v=pivot[sede]&&pivot[sede][ym]?pivot[sede][ym]:0;
+      const cls=v===0?'zero':'';
+      html+='<td class="'+cls+'">'+(v===0?'—':v)+'</td>';
+      rowT+=v;colTotals[ym]+=v;
+    });
+    html+='<td style="font-weight:700;color:var(--accent3)">'+rowT+'</td></tr>';
+    grandTotal+=rowT;
+  });
+  html+='<tr class="total-row"><td class="sede-cell">TOTAL</td>';
+  yms.forEach(function(ym){html+='<td>'+colTotals[ym]+'</td>';});
+  html+='<td>'+grandTotal+'</td></tr>';
+  html+='</tbody></table>';
+  document.getElementById('citas-container').innerHTML=html;
+}
+
+function renderDocTabs(){
+  const row=document.getElementById('doc-tabs-row');
+  // Always use groupedAll for doctor list so tabs don't disappear when switching tables
+  const docs=Object.keys(groupedAll);
+  const activeSet=new Set(Object.keys(activeData()));
+  row.innerHTML='';
+  const allBtn=document.createElement('button');
+  allBtn.className='doc-tab'+(currentDoctor==='all'?' active':'');
+  allBtn.textContent='Todos';
+  allBtn.onclick=function(){switchDocTab('all');};
+  row.appendChild(allBtn);
+  docs.forEach(function(doc){
+    const hasData=activeSet.has(doc);
+    const btn=document.createElement('button');
+    btn.className='doc-tab'+(currentDoctor===doc?' active':'')+(hasData?'':' no-data');
+    btn.textContent=title(doc);
+    btn.title=hasData?'':'Sin datos en esta tabla';
+    btn.onclick=function(){switchDocTab(doc);};
+    row.appendChild(btn);
+  });
+}
+function switchDocTab(doc){currentDoctor=doc;document.getElementById('search-input').value='';renderDocTabs();renderValidation();renderTable();}
+
+// ── SORT ───────────────────────────────────────────────
+function toggleSort(){
+  sortMode=(sortMode+1)%3;
+  const btn=document.getElementById('sort-btn');
+  const labels=['↕ Ordenar','↓ Mayor a menor','↑ Menor a mayor'];
+  btn.textContent=labels[sortMode];
+  btn.style.color=sortMode>0?'var(--accent)':'';
+  btn.style.borderColor=sortMode>0?'rgba(79,237,226,.4)':'';
+  renderTable();
+}
+
+// ── TABLE RENDER ───────────────────────────────────────
+function activeData(){return currentTableTab===1?groupedAll:currentTableTab===2?groupedClean:currentTableTab===3?groupedExcl:groupedOvodo;}
+function renderTable(){
+  const search=document.getElementById('search-input').value.toLowerCase();
+  const tbody=document.getElementById('table-body');tbody.innerHTML='';
+  const data=activeData();
+  const docs=currentDoctor==='all'?Object.keys(data):[currentDoctor];
+  const cc=`c${currentTableTab}`;
+  let allRows=[];
+  docs.forEach(doc=>{Object.entries(data[doc]||{}).forEach(([prod,d])=>allRows.push({doc,prod,qty:d.qty,total:d.total}));});
+  if(sortMode===1) allRows.sort((a,b)=>b.total-a.total);
+  else if(sortMode===2) allRows.sort((a,b)=>a.total-b.total);
+  else allRows.sort((a,b)=>a.doc.localeCompare(b.doc)||a.prod.localeCompare(b.prod));
+  if(search)allRows=allRows.filter(r=>r.prod.toLowerCase().includes(search)||r.doc.toLowerCase().includes(search));
+  if(!allRows.length){
+    const msg=currentDoctor!=='all'&&!Object.keys(activeData()).includes(currentDoctor)
+      ?title(currentDoctor)+' no tiene productos en esta tabla.'
+      :'Sin resultados.';
+    tbody.innerHTML='<tr><td colspan="3" style="text-align:center;color:var(--text3);padding:32px;">'+msg+'</td></tr>';return;}
+  let lastDoc=null,gQty=0,gTotal=0;
+  allRows.forEach(r=>{
+    if(currentDoctor==='all'&&r.doc!==lastDoc){
+      tbody.innerHTML+=`<tr><td colspan="3" style="background:var(--surface2);color:var(--t${currentTableTab});font-weight:700;font-size:11px;padding:9px 16px;letter-spacing:1px;text-transform:uppercase;font-family:'DM Mono',monospace;">${title(r.doc)}</td></tr>`;
+      lastDoc=r.doc;
+    }
+    tbody.innerHTML+=`<tr><td>${r.prod}</td><td class="num muted">${r.qty.toLocaleString()}</td><td class="num">${fmt(r.total)}</td></tr>`;
+    gQty+=r.qty;gTotal+=r.total;
+  });
+  tbody.innerHTML+=`<tr class="total-row ${cc}"><td>TOTAL ${currentDoctor!=='all'?'— '+title(currentDoctor):'GENERAL'}</td><td class="num">${gQty.toLocaleString()}</td><td class="num">${fmt(gTotal)}</td></tr>`;
+}
+
+// ── EXPORT EXCEL ───────────────────────────────────────
+function exportExcel(){
+  const wb=XLSX.utils.book_new();
+  const tables=[
+    {label:'T1 - Todos',data:groupedAll},
+    {label:'T2 - Sin exclusiones',data:groupedClean},
+    {label:'T3 - Excl+Ovodonacion',data:groupedExcl},
+    {label:'T4 - Solo Ovodonacion',data:groupedOvodo},
+  ];
+  tables.forEach(({label,data})=>{
+    const rows=[['Doctor','Producto','Cantidad','Total sin IVA']];
+    Object.entries(data).forEach(([doc,prods])=>{
+      let dT=0,dQ=0;
+      Object.entries(prods).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([prod,d])=>{rows.push([title(doc),prod,d.qty,d.total]);dT+=d.total;dQ+=d.qty;});
+      rows.push([`SUBTOTAL — ${title(doc)}`,'',dQ,dT]);
+    });
+    const ws=XLSX.utils.aoa_to_sheet(rows);ws['!cols']=[{wch:32},{wch:48},{wch:12},{wch:18}];
+    XLSX.utils.book_append_sheet(wb,ws,label);
+  });
+  XLSX.writeFile(wb,`Reporte_${getMonthLabel()}.xlsx`);
+  showToast('Excel con 4 hojas descargado','success');
+}
+
+// ── EXPORT PDF ─────────────────────────────────────────
+function exportPDF(){
+  // Respect current table tab and doctor filter
+  const tNum=currentTableTab;
+  const doc=currentDoctor;
+  const tNames=['Todos los productos','Sin exclusiones','Excluidos + Ovodonacion','Solo Ovodonacion'];
+  const tColors=['#1B6CA8','#5B3EA6','#B03040','#9A6B00'];
+  const tBgs=['#EBF5FB','#EDE9FB','#FDE8E8','#FEF9EC'];
+  const col=tColors[tNum-1], bg=tBgs[tNum-1];
+  const data=activeData();
+  const docLabel=doc==='all'?'Todos los doctores':title(doc);
+  const tabLabel='Tabla '+tNum+' — '+tNames[tNum-1];
+  const month=getMonthLabel();
+  const ew=exclusionWords.map(function(w){return '"'+w+'"';}).join(', ')||'ninguno';
+
+  // Get docs to render
+  const docs=doc==='all'?Object.keys(data):[doc];
+
+  // Build HTML then inject into a hidden iframe and print
+  let html='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>'+tabLabel+' — '+docLabel+'</title>'
+  +'<style>body{font-family:Arial,sans-serif;color:#1a1a2e;margin:32px;font-size:12px;}'
+  +'h1{font-size:20px;color:#0D2137;margin-bottom:2px;}'
+  +'.meta{color:#666;font-size:11px;margin-bottom:6px;}'
+  +'.filter-info{display:inline-block;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;margin-bottom:20px;}'
+  +'.sec-title{font-size:15px;font-weight:700;margin:0 0 12px;padding-bottom:6px;border-bottom:3px solid;}'
+  +'.doc-block{margin-bottom:20px;page-break-inside:avoid;}'
+  +'.doc-name{padding:7px 12px;font-weight:700;font-size:13px;border-radius:4px 4px 0 0;margin:0;}'
+  +'table{width:100%;border-collapse:collapse;}'
+  +'th{padding:7px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.5px;border:1px solid #ddd;}'
+  +'th.r{text-align:right;}td{padding:6px 10px;border:1px solid #eee;font-size:11px;}td.r{text-align:right;}'
+  +'tr:nth-child(even) td{background:#fafafa;}.tot td{font-weight:700;border-top:2px solid #ccc;}'
+  +'.grand{text-align:right;font-size:14px;font-weight:700;margin-top:12px;padding-top:8px;border-top:2px solid;}'
+  +'.no-print{margin-bottom:24px;}@media print{.no-print{display:none;}body{margin:16px;}}'
+  +'</style></head><body>';
+
+  html+='<h1>Reporte de Ventas — '+month+'</h1>';
+  html+='<div class="meta">Generado el '+new Date().toLocaleDateString('es-MX',{weekday:'long',year:'numeric',month:'long',day:'numeric'})+'</div>';
+  html+='<span class="filter-info" style="background:'+col+';color:#fff;">'+tabLabel+'</span>';
+  if(doc!=='all') html+='&nbsp;<span class="filter-info" style="background:#1a1a2e;color:#fff;border:1px solid #ccc;">Doctor: '+title(doc)+'</span>';
+  html+='<br><br>';
+  html+='<button class="no-print" onclick="window.print()" style="padding:8px 20px;background:'+col+';color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;">🖨 Imprimir / Guardar PDF</button>';
+
+  html+='<div class="sec-title" style="color:'+col+';border-color:'+col+';">'+tabLabel+(doc!=='all'?' — '+title(doc):'')+'</div>';
+
+  let gTotal=0, gQty=0;
+  docs.forEach(function(d){
+    const prods=data[d];
+    if(!prods||!Object.keys(prods).length) return;
+    let dT=0,dQ=0;
+    const sorted=Object.entries(prods).sort(function(a,b){return a[0].localeCompare(b[0]);});
+    html+='<div class="doc-block"><p class="doc-name" style="background:'+col+';color:#fff;">'+title(d)+'</p>';
+    html+='<table><thead><tr>'
+      +'<th style="background:'+bg+';color:'+col+'">Producto</th>'
+      +'<th class="r" style="background:'+bg+';color:'+col+'">Cant.</th>'
+      +'<th class="r" style="background:'+bg+';color:'+col+'">Total sin IVA</th>'
+      +'</tr></thead><tbody>';
+    sorted.forEach(function(entry){
+      const prod=entry[0],dd=entry[1];
+      html+='<tr><td>'+prod+'</td><td class="r">'+dd.qty+'</td><td class="r">'+fmt(dd.total)+'</td></tr>';
+      dT+=dd.total; dQ+=dd.qty;
+    });
+    html+='<tr class="tot"><td>Subtotal</td><td class="r">'+dQ+'</td><td class="r">'+fmt(dT)+'</td></tr>';
+    html+='</tbody></table></div>';
+    gTotal+=dT; gQty+=dQ;
+  });
+
+  html+='<div class="grand" style="color:'+col+';border-color:'+col+';">TOTAL GENERAL: '+fmt(gTotal)+'</div>';
+  html+='</body></html>';
+  // Inject into hidden iframe and trigger print
+  let iframe=document.getElementById('pdf-iframe');
+  if(!iframe){
+    iframe=document.createElement('iframe');
+    iframe.id='pdf-iframe';
+    iframe.style.cssText='position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;border:none;';
+    document.body.appendChild(iframe);
+  }
+  const idoc=iframe.contentDocument||iframe.contentWindow.document;
+  idoc.open();idoc.write(html);idoc.close();
+  setTimeout(function(){
+    iframe.contentWindow.focus();
+    iframe.contentWindow.print();
+    showToast('PDF abierto — '+tabLabel+(doc!=='all'?' ('+title(doc)+')':''),'success');
+  },400);
+}
+
+// ── HELPERS ────────────────────────────────────────────
+function norm(s){return(s||'').toString().toLowerCase().trim();}
+function title(s){return s.replace(/\w\S*/g,w=>w[0].toUpperCase()+w.slice(1).toLowerCase());}
+function esc(s){return s.replace(/'/g,"\\'");}
+function fmt(n){return new Intl.NumberFormat('es-MX',{style:'currency',currency:'MXN',minimumFractionDigits:2}).format(n);}
+function getMonthLabel(){const d=new Date();return`${d.toLocaleString('es-MX',{month:'long'})}_${d.getFullYear()}`;}
+function show(id){document.getElementById(id).classList.add('visible');}
+
+function resetFile(){
+  rawData=[];allDoctors=[];selectedDoctors=[];groupedAll={};groupedClean={};groupedExcl={};groupedOvodo={};
+  document.getElementById('upload-section').style.display='block';
+  document.getElementById('file-banner').classList.remove('visible');
+  ['doctors-section','exclusion-section','ovodo-section','generate-section'].forEach(id=>document.getElementById(id).classList.remove('visible'));
+  document.getElementById('results').classList.remove('visible');
+  document.getElementById('file-input').value='';
+}
+
+let toastTimer;
+function showToast(msg,type=''){
+  const t=document.getElementById('toast');t.textContent=msg;t.className=`toast show ${type}`;
+  clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),3200);
+}
+
+
+// ═══════════════════════════════════════════════════════
+// CITAS STATE
+// ═══════════════════════════════════════════════════════
+let citasRaw=[];
+let citasPivotData=null;
+
+// Exclusions — names to remove from citas
+const CITAS_EXCLUDE=new Set([
+  'Sesión de Acupuntura','Sesión de Acupuntura Incluída',
+  'Sesión de Masaje','Sesión de Masaje Incluída',
+  'Consulta de nutrición','Consulta de nutrición incluida',
+  'Consulta de nutrición online','Consulta de nutrición online incluida',
+  'Terapia psicológica','Terapia psicológica incluida',
+  'Terapia psicológica online','Terapia psicológica online incluida',
+  'Consulta ginecológica'
+]);
+
+// ── CITAS UPLOAD ───────────────────────────────────────
+const citasDropZone=document.getElementById('citas-drop-zone');
+const citasInput=document.getElementById('citas-file-input');
+citasDropZone.addEventListener('dragover',function(e){e.preventDefault();citasDropZone.classList.add('drag-over');});
+citasDropZone.addEventListener('dragleave',function(){citasDropZone.classList.remove('drag-over');});
+citasDropZone.addEventListener('drop',function(e){e.preventDefault();citasDropZone.classList.remove('drag-over');if(e.dataTransfer.files[0])handleCitasFile(e.dataTransfer.files[0]);});
+citasInput.addEventListener('change',function(e){if(e.target.files[0])handleCitasFile(e.target.files[0]);});
+
+function handleCitasFile(file){
+  const isCsv=file.name.toLowerCase().endsWith('.csv');
+  const reader=new FileReader();
+  if(isCsv){
+    reader.onload=function(e){
+      try{
+        const rows=parseCSVRobust(e.target.result);
+        processCitasRows(rows,file.name);
+      }catch(err){showToast('Error CSV citas: '+err.message,'error');}
+    };
+    reader.readAsText(file,'UTF-8');
+  } else {
+    reader.onload=function(e){
+      const wb=XLSX.read(e.target.result,{type:'array',cellDates:true});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      processCitasRows(XLSX.utils.sheet_to_json(ws,{defval:''}),file.name);
+    };
+    reader.readAsArrayBuffer(file);
+  }
+}
+
+function processCitasRows(rows,filename){
+  if(!rows.length){showToast('Archivo citas vacío','error');return;}
+  citasRaw=rows;
+  document.getElementById('citas-banner').classList.add('visible');
+  document.getElementById('citas-banner-name').textContent=filename;
+  document.getElementById('citas-banner-meta').textContent=rows.length.toLocaleString()+' registros de citas';
+  showToast('Citas cargadas: '+rows.length.toLocaleString()+' filas','success');
+}
+
+function resetCitas(){
+  citasRaw=[];citasPivotData=null;
+  document.getElementById('citas-banner').classList.remove('visible');
+  document.getElementById('citas-file-input').value='';
+  document.getElementById('citas-container').innerHTML='';
+  document.getElementById('conv-container').innerHTML='';
+}
+
+// ── BUILD CITAS PIVOT ──────────────────────────────────
+function buildCitasPivot(yms){
+  // Filter: year>=2025, estado=Terminada, primera vez names, not excluded
+  const PRIMERA=[
+    'Consulta primera vez','Consulta primera vez 30min',
+    'Consulta primera vez gratis','Consulta primera vez online',
+    'Consulta primera vez online gratis','(Ex) Consulta primera vez',
+    "Consulta de Primera Vez IP's",'Consulta genética primera vez'
+  ];
+  const filtered=citasRaw.filter(function(r){
+    const ym=parseFch(r.fecha);
+    if(!ym) return false;
+    const year=parseInt(ym.substring(0,4));
+    if(isNaN(year)||year<2025) return false;
+    if(r.estados_citas_name!=='Terminada') return false;
+    if(!PRIMERA.includes(r.citas_concep_name)) return false;
+    if(CITAS_EXCLUDE.has(r.citas_concep_name)) return false;
+    return true;
+  });
+
+  const sedeSet=new Set(), pivot={};
+  filtered.forEach(function(r){
+    const sede=r.delegaciones_name_comer||'(Sin sede)';
+    const ym=parseFch(r.fecha);
+    sedeSet.add(sede);
+    if(!pivot[sede])pivot[sede]={};
+    if(!pivot[sede][ym])pivot[sede][ym]=0;
+    pivot[sede][ym]++;
+  });
+
+  const sedes=[...sedeSet].sort();
+  citasPivotData={sedes,yms,pivot};
+  return citasPivotData;
+}
+
+// ── CONVERSION TABLE ───────────────────────────────────
+function buildConversionTable(ciclosPivot, citasPivot){
+  const sedes=ciclosPivot.sedes;
+  const yms=ciclosPivot.yms;
+  const cp=ciclosPivot.pivot;
+  const tp=citasPivot.pivot;
+
+  let html='<table class="pivot-table"><thead><tr>';
+  html+='<th class="sede-h">Sede</th>';
+  yms.forEach(function(ym){html+='<th class="conv-h">'+ym+'</th>';});
+  html+='<th class="conv-h">Total</th></tr></thead><tbody>';
+
+  let grandCiclos=0, grandCitas=0;
+  const colCiclos={}, colCitas={};
+  yms.forEach(function(ym){colCiclos[ym]=0;colCitas[ym]=0;});
+
+  sedes.forEach(function(sede){
+    html+='<tr><td class="sede-cell">'+sede+'</td>';
+    let rowCiclos=0, rowCitas=0;
+    yms.forEach(function(ym){
+      const ciclos=cp[sede]&&cp[sede][ym]?cp[sede][ym].size:0;
+      const citas=tp[sede]&&tp[sede][ym]?tp[sede][ym]:0;
+      const conv=citas>0?((ciclos/citas)*100).toFixed(1):'—';
+      const cls=conv!=='—'&&parseFloat(conv)>0?'conv-cell':'zero';
+      html+='<td class="'+cls+'">'+(conv!=='—'?conv+'%':'—')+'</td>';
+      rowCiclos+=ciclos; rowCitas+=citas;
+      colCiclos[ym]+=ciclos; colCitas[ym]+=citas;
+    });
+    const rowConv=rowCitas>0?((rowCiclos/rowCitas)*100).toFixed(1)+'%':'—';
+    html+='<td class="conv-cell">'+rowConv+'</td></tr>';
+    grandCiclos+=rowCiclos; grandCitas+=rowCitas;
+  });
+
+  // Total row
+  html+='<tr class="total-row"><td class="sede-cell">TOTAL</td>';
+  yms.forEach(function(ym){
+    const conv=colCitas[ym]>0?((colCiclos[ym]/colCitas[ym])*100).toFixed(1)+'%':'—';
+    html+='<td>'+conv+'</td>';
+  });
+  const grandConv=grandCitas>0?((grandCiclos/grandCitas)*100).toFixed(1)+'%':'—';
+  html+='<td>'+grandConv+'</td></tr>';
+  html+='</tbody></table>';
+  return html;
+}
+
+
+// ═══════════════════════════════════════════════════════
+// CONVERSIÓN POR DOCTOR
+// ═══════════════════════════════════════════════════════
+function buildXdoc(){
+  if(!pivotData){
+    document.getElementById('xdoc-info-card').style.display='block';
+    document.getElementById('xdoc-result').classList.remove('visible');
+    return;
+  }
+  document.getElementById('xdoc-info-card').style.display='none';
+
+  const yms=pivotData.yms;
+
+  // ── Ciclos por doctor ───────────────────────────────
+  // pivot[sede][ym] is Set of his_name — we need doctor dimension from ciclosRaw
+  const docCiclos={};  // docCiclos[doctor][ym] = Set of his_name
+  const activeTratArr=[...activeTrats];
+  ciclosRaw.forEach(function(r){
+    const ym=parseFch(r.fecha_final);
+    if(!ym) return;
+    const year=parseInt(ym.substring(0,4));
+    if(isNaN(year)||year<2025) return;
+    const tipo=(r.tipo_paciente||'').trim();
+    if(!tipo||tipo==='Externo') return;
+    if(!activeTratArr.includes(r.tratamiento)) return;
+    const doc=(r.doctor||'').trim();
+    if(!doc) return;
+    if(!docCiclos[doc]) docCiclos[doc]={};
+    if(!docCiclos[doc][ym]) docCiclos[doc][ym]=new Set();
+    docCiclos[doc][ym].add(r.his_name||r.his_id||'?');
+  });
+
+  // ── Citas por doctor ────────────────────────────────
+  const PRIMERA=[
+    'Consulta primera vez','Consulta primera vez 30min',
+    'Consulta primera vez gratis','Consulta primera vez online',
+    'Consulta primera vez online gratis','(Ex) Consulta primera vez',
+    "Consulta de Primera Vez IP's",'Consulta genética primera vez'
+  ];
+  const docCitas={};  // docCitas[doctor][ym] = count
+  if(citasRaw.length>0){
+    citasRaw.forEach(function(r){
+      const ym=parseFch(r.fecha);
+      if(!ym) return;
+      const year=parseInt(ym.substring(0,4));
+      if(isNaN(year)||year<2025) return;
+      if(r.estados_citas_name!=='Terminada') return;
+      if(!PRIMERA.includes(r.citas_concep_name)) return;
+      if(CITAS_EXCLUDE.has(r.citas_concep_name)) return;
+      const doc=(r.profesionales_name||r.profesionales||'').trim();
+      if(!doc) return;
+      if(!docCitas[doc]) docCitas[doc]={};
+      if(!docCitas[doc][ym]) docCitas[doc][ym]=0;
+      docCitas[doc][ym]++;
+    });
+  }
+
+  // Only doctors with at least one ciclo or cita in 2025+
+  const allDocs=new Set([...Object.keys(docCiclos),...Object.keys(docCitas)]);
+  const docs=[...allDocs].filter(function(d){
+    return yms.some(function(ym){
+      return (docCiclos[d]&&docCiclos[d][ym]&&docCiclos[d][ym].size>0)||
+             (docCitas[d]&&docCitas[d][ym]&&docCitas[d][ym]>0);
+    });
+  }).sort();
+
+  document.getElementById('xdoc-citas-container').innerHTML=renderXdocTable(docs,yms,
+    function(doc,ym){return docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;},
+    'count','#5B3EA6','#EDE9FB');
+
+  document.getElementById('xdoc-ciclos-container').innerHTML=renderXdocTable(docs,yms,
+    function(doc,ym){return docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym].size:0;},
+    'count','#1B6CA8','#EBF5FB');
+
+  document.getElementById('xdoc-conv-container').innerHTML=renderXdocTable(docs,yms,
+    function(doc,ym){
+      const ciclos=docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym].size:0;
+      const citas=docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;
+      return citas>0?parseFloat(((ciclos/citas)*100).toFixed(1)):null;
+    },
+    'pct','#9A6B00','#FEF9EC');
+
+  // Store for export
+  window._xdocState={docs,yms,docCiclos,docCitas};
+  show('xdoc-result');
+}
+
+function renderXdocTable(docs,yms,getValue,mode,col,bg){
+  let html='<table class="pivot-table"><thead><tr>';
+  html+='<th class="sede-h" style="min-width:220px;">Doctor</th>';
+  yms.forEach(function(ym){html+='<th>'+ym+'</th>';});
+  html+='<th>Total</th></tr></thead><tbody>';
+
+  let grandN=0, grandD=0;
+  const colN={},colD={};
+  yms.forEach(function(ym){colN[ym]=0;colD[ym]=0;});
+
+  docs.forEach(function(doc){
+    html+='<tr><td class="sede-cell">'+doc+'</td>';
+    let rowN=0,rowD=0;
+    yms.forEach(function(ym){
+      const v=getValue(doc,ym);
+      if(mode==='pct'){
+        const ciclos=window._xdocState&&window._xdocState.docCiclos[doc]&&window._xdocState.docCiclos[doc][ym]?window._xdocState.docCiclos[doc][ym].size:0;
+        const citas=window._xdocState&&window._xdocState.docCitas[doc]&&window._xdocState.docCitas[doc][ym]?window._xdocState.docCitas[doc][ym]:0;
+        colN[ym]+=ciclos;colD[ym]+=citas;
+        const disp=v===null?'—':v+'%';
+        const cls=v===null?'zero':'conv-cell';
+        html+='<td class="'+cls+'">'+disp+'</td>';
+        rowN+=ciclos;rowD+=citas;
+      } else {
+        const n=v||0;
+        colN[ym]+=n;
+        const cls=n===0?'zero':'';
+        html+='<td class="'+cls+'">'+(n===0?'—':n)+'</td>';
+        rowN+=n;
+      }
+    });
+    if(mode==='pct'){
+      const rv=rowD>0?((rowN/rowD)*100).toFixed(1)+'%':'—';
+      html+='<td class="conv-cell">'+rv+'</td>';
+    } else {
+      html+='<td style="font-weight:700;color:var(--accent3)">'+rowN+'</td>';
+      grandN+=rowN;
+    }
+    html+='</tr>';
+  });
+
+  // Total row
+  html+='<tr class="total-row"><td class="sede-cell">TOTAL</td>';
+  yms.forEach(function(ym){
+    if(mode==='pct'){
+      const tv=colD[ym]>0?((colN[ym]/colD[ym])*100).toFixed(1)+'%':'—';
+      html+='<td>'+tv+'</td>';
+    } else {
+      html+='<td>'+colN[ym]+'</td>';
+      grandN+=0;
+    }
+  });
+  if(mode==='pct'){
+    const grand=Object.values(colD).reduce(function(a,b){return a+b;},0);
+    const grandC=Object.values(colN).reduce(function(a,b){return a+b;},0);
+    html+='<td>'+(grand>0?((grandC/grand)*100).toFixed(1)+'%':'—')+'</td>';
+  } else {
+    html+='<td>'+Object.values(colN).reduce(function(a,b){return a+b;},0)+'</td>';
+  }
+  html+='</tr></tbody></table>';
+  return html;
+}
+
+function exportXdocExcel(){
+  if(!window._xdocState){showToast('Genera primero la tabla','error');return;}
+  const {docs,yms,docCiclos,docCitas}=window._xdocState;
+  const wb=XLSX.utils.book_new();
+
+  function addSheet(label,getValue){
+    const rows=[['Doctor',...yms,'Total']];
+    docs.forEach(function(doc){
+      const row=[doc];let rowT=0;
+      yms.forEach(function(ym){const v=getValue(doc,ym)||0;row.push(v);rowT+=v;});
+      row.push(rowT);rows.push(row);
+    });
+    const ws=XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols']=[{wch:36},...yms.map(function(){return{wch:12};}),{wch:12}];
+    XLSX.utils.book_append_sheet(wb,ws,label);
+  }
+
+  addSheet('Citas x Doctor',function(doc,ym){return docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;});
+  addSheet('Ciclos x Doctor',function(doc,ym){return docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym].size:0;});
+
+  const rows3=[['Doctor',...yms,'Total']];
+  docs.forEach(function(doc){
+    const row=[doc];let rN=0,rD=0;
+    yms.forEach(function(ym){
+      const ciclos=docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym].size:0;
+      const citas=docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;
+      const v=citas>0?parseFloat(((ciclos/citas)*100).toFixed(1)):0;
+      row.push(v);rN+=ciclos;rD+=citas;
+    });
+    row.push(rD>0?parseFloat(((rN/rD)*100).toFixed(1)):0);
+    rows3.push(row);
+  });
+  const ws3=XLSX.utils.aoa_to_sheet(rows3);
+  ws3['!cols']=[{wch:36},...yms.map(function(){return{wch:12};}),{wch:12}];
+  XLSX.utils.book_append_sheet(wb,ws3,'Conversion x Doctor %');
+  XLSX.writeFile(wb,'Conversion_Doctor_'+getMonthLabel()+'.xlsx');
+  showToast('Excel descargado','success');
+}
+
+// ═══════════════════════════════════════════════════════
+// PAGE NAV
+// ═══════════════════════════════════════════════════════
+function switchPage(page){
+  ['ventas','ciclos','xdoc'].forEach(function(p){
+    document.getElementById('page-'+p).classList.toggle('active', p===page);
+    document.getElementById('nav-'+p).classList.toggle('active', p===page);
+  });
+  if(page==='xdoc') buildXdoc();
+}
+
+// ═══════════════════════════════════════════════════════
+// CICLOS STATE
+// ═══════════════════════════════════════════════════════
+let ciclosRaw=[];
+let activeTrats=new Set(['FIV','Vitri de Ovulos']);
+let allTrats=[];
+let pivotData=null;
+
+// ── CICLOS UPLOAD ──────────────────────────────────────
+const ciclosDropZone=document.getElementById('ciclos-drop-zone');
+const ciclosInput=document.getElementById('ciclos-file-input');
+ciclosDropZone.addEventListener('dragover',function(e){e.preventDefault();ciclosDropZone.classList.add('drag-over');});
+ciclosDropZone.addEventListener('dragleave',function(){ciclosDropZone.classList.remove('drag-over');});
+ciclosDropZone.addEventListener('drop',function(e){e.preventDefault();ciclosDropZone.classList.remove('drag-over');if(e.dataTransfer.files[0])handleCiclosFile(e.dataTransfer.files[0]);});
+ciclosInput.addEventListener('change',function(e){if(e.target.files[0])handleCiclosFile(e.target.files[0]);});
+
+function parseCSVRobust(text){
+  // Handles quoted fields, commas inside quotes, escaped quotes
+  const rows=[];
+  let headers=null;
+  let i=0;
+  const len=text.length;
+  while(i<len){
+    const row=[];
+    while(i<len){
+      let val='';
+      if(text[i]==='"'){
+        i++; // skip opening quote
+        while(i<len){
+          if(text[i]==='"' && text[i+1]==='"'){val+='"';i+=2;}
+          else if(text[i]==='"'){i++;break;}
+          else{val+=text[i++];}
+        }
+      } else {
+        while(i<len && text[i]!==',' && text[i]!=='\n' && text[i]!=='\r'){val+=text[i++];}
+      }
+      row.push(val.trim());
+      if(i<len && text[i]===','){i++;} else {break;}
+    }
+    // skip \r\n or \n
+    if(i<len && text[i]==='\r') i++;
+    if(i<len && text[i]==='\n') i++;
+    if(row.length===0||(row.length===1&&row[0]==='')) continue;
+    if(!headers){headers=row;}
+    else{
+      const obj={};
+      headers.forEach(function(h,idx){obj[h]=row[idx]||'';});
+      rows.push(obj);
+    }
+  }
+  return rows;
+}
+
+function handleCiclosFile(file){
+  const isCsv=file.name.toLowerCase().endsWith('.csv');
+  const reader=new FileReader();
+  if(isCsv){
+    reader.onload=function(e){
+      try{
+        const rows=parseCSVRobust(e.target.result);
+        processCiclosRows(rows, file.name);
+      }catch(err){showToast('Error CSV: '+err.message,'error');}
+    };
+    reader.readAsText(file,'UTF-8');
+  } else {
+    reader.onload=function(e){
+      const wb=XLSX.read(e.target.result,{type:'array',cellDates:true});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      processCiclosRows(XLSX.utils.sheet_to_json(ws,{defval:''}), file.name);
+    };
+    reader.readAsArrayBuffer(file);
+  }
+}
+
+function parseFch(fch){
+  // "2025-01-15 19:00:00-05" -> "2025-01"
+  if(!fch) return null;
+  const s=String(fch).trim();
+  const m=s.match(/^(\d{4})-(\d{2})/);
+  return m ? m[1]+'-'+m[2] : null;
+}
+
+function processCiclosRows(rows, filename){
+  if(!rows.length){showToast('Archivo vacío','error');return;}
+  ciclosRaw=rows;
+
+  // Detect unique trats (tipo_paciente filtered automatically)
+  const tratSet=new Set();
+  rows.forEach(function(r){ if(r.tratamiento) tratSet.add(r.tratamiento); });
+  allTrats=[...tratSet].sort();
+
+  // Default selections
+  activeTrats=new Set(['FIV','Vitri de Ovulos'].filter(function(t){return tratSet.has(t);}));
+
+  document.getElementById('ciclos-upload-section').style.display='none';
+  document.getElementById('ciclos-banner').classList.add('visible');
+  document.getElementById('ciclos-banner-name').textContent=filename;
+  document.getElementById('ciclos-banner-meta').textContent=rows.length.toLocaleString()+' registros cargados';
+  show('ciclos-filters');
+  show('citas-upload-section');
+  renderChips();
+  showToast('Ciclos cargados: '+rows.length.toLocaleString()+' filas','success');
+}
+
+// ── CHIPS ──────────────────────────────────────────────
+function renderChips(){
+  const el=document.getElementById('chips-trat');el.innerHTML='';
+  allTrats.forEach(function(item){
+    const btn=document.createElement('button');
+    btn.className='chip'+(activeTrats.has(item)?' on-p':'');
+    btn.textContent=item;
+    btn.onclick=function(){activeTrats.has(item)?activeTrats.delete(item):activeTrats.add(item);renderChips();};
+    el.appendChild(btn);
+  });
+}
+function toggleTrat(t){activeTrats.has(t)?activeTrats.delete(t):activeTrats.add(t);renderChips();}
+
+// ── BUILD PIVOT ────────────────────────────────────────
+function buildPivot(){
+  if(!ciclosRaw.length){showToast('Sube un archivo primero','error');return;}
+
+  // Filter rows: year>=2025, tipo != Externo/blank, trat in activeTrats
+  const filtered=ciclosRaw.filter(function(r){
+    const ym=parseFch(r.fecha_final);
+    if(!ym) return false;
+    const year=parseInt(ym.substring(0,4));
+    if(isNaN(year)||year<2025) return false;
+    // Exclude Externo and blank tipo_paciente
+    const tipo=(r.tipo_paciente||'').trim();
+    if(!tipo || tipo==='Externo') return false;
+    if(!activeTrats.has(r.tratamiento)) return false;
+    return true;
+  });
+
+  if(!filtered.length){showToast('Sin datos con los filtros actuales','error');return;}
+
+  // Build pivot: sede x ym -> Set of his_name
+  const sedeSet=new Set(), ymSet=new Set();
+  const pivot={};  // pivot[sede][ym] = Set of his_name
+
+  filtered.forEach(function(r){
+    const sede=r.del_name_comer||'(Sin sede)';
+    const ym=parseFch(r.fecha_final);
+    if(!ym) return;
+    const name=r.his_name||'';
+    sedeSet.add(sede); ymSet.add(ym);
+    if(!pivot[sede]) pivot[sede]={};
+    if(!pivot[sede][ym]) pivot[sede][ym]=new Set();
+    pivot[sede][ym].add(name);
+  });
+
+  const sedes=[...sedeSet].sort();
+  const yms=[...ymSet].sort();
+  pivotData={sedes,yms,pivot};
+
+  renderPivot(pivotData);
+
+  // Build citas pivot if loaded
+  if(citasRaw.length>0){
+    const cp=buildCitasPivot(yms);
+    renderCitasPivot(cp);
+    document.getElementById('conv-container').innerHTML=buildConversionTable(pivotData, cp);
+  } else {
+    document.getElementById('citas-container').innerHTML='<p style="color:var(--text3);font-size:13px;padding:16px 0;">Sube el archivo de citas para ver esta tabla y la conversión.</p>';
+    document.getElementById('conv-container').innerHTML='';
+  }
+
+  document.getElementById('ciclos-subtitle').textContent=
+    'Excluye: Externo | Tratamientos: '+[...activeTrats].join(', ');
+  show('ciclos-result');
+  showToast('Tablas generadas','success');
+}
+
+function renderPivot(pd){
+  const {sedes,yms,pivot}=pd;
+  let html='<table class="pivot-table"><thead><tr>';
+  html+='<th class="sede-h">Sede</th>';
+  yms.forEach(function(ym){html+='<th>'+ym+'</th>';});
+  html+='<th>Total</th></tr></thead><tbody>';
+
+  // Compute max for heatmap
+  let maxVal=0;
+  sedes.forEach(function(sede){
+    yms.forEach(function(ym){
+      const v=pivot[sede]&&pivot[sede][ym]?pivot[sede][ym].size:0;
+      if(v>maxVal)maxVal=v;
+    });
+  });
+
+  // Column totals
+  const colTotals={};
+  yms.forEach(function(ym){colTotals[ym]=0;});
+  let grandTotal=0;
+
+  sedes.forEach(function(sede){
+    let rowTotal=0;
+    html+='<tr><td class="sede-cell">'+sede+'</td>';
+    yms.forEach(function(ym){
+      const v=pivot[sede]&&pivot[sede][ym]?pivot[sede][ym].size:0;
+      const heat=maxVal>0?Math.ceil((v/maxVal)*5):0;
+      const cls=v===0?'zero':'heat-'+heat;
+      html+='<td class="'+cls+'">'+(v===0?'—':v)+'</td>';
+      rowTotal+=v; colTotals[ym]+=v; grandTotal+=v;
+    });
+    html+='<td style="font-weight:700;color:var(--accent3)">'+rowTotal+'</td></tr>';
+  });
+
+  // Total row
+  html+='<tr class="total-row"><td class="sede-cell">TOTAL</td>';
+  yms.forEach(function(ym){html+='<td>'+colTotals[ym]+'</td>';});
+  html+='<td>'+grandTotal+'</td></tr>';
+  html+='</tbody></table>';
+  document.getElementById('pivot-container').innerHTML=html;
+}
+
+// ── EXPORT CICLOS EXCEL ────────────────────────────────
+function exportCiclosExcel(){
+  if(!pivotData){showToast('Genera la tabla primero','error');return;}
+  const wb=XLSX.utils.book_new();
+  const {sedes,yms,pivot}=pivotData;
+
+  function makeSheet(getData, label){
+    const rows=[['Sede',...yms,'Total']];
+    const colT={}; yms.forEach(function(ym){colT[ym]=0;}); let grand=0;
+    sedes.forEach(function(sede){
+      let rowT=0; const row=[sede];
+      yms.forEach(function(ym){const v=getData(sede,ym);row.push(v);colT[ym]+=v;rowT+=v;});
+      row.push(rowT);grand+=rowT;rows.push(row);
+    });
+    rows.push(['TOTAL',...yms.map(function(ym){return colT[ym];}),grand]);
+    const ws=XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols']=[{wch:36},...yms.map(function(){return{wch:12};}),{wch:12}];
+    XLSX.utils.book_append_sheet(wb,ws,label);
+  }
+
+  // Ciclos sheet
+  makeSheet(function(sede,ym){return pivot[sede]&&pivot[sede][ym]?pivot[sede][ym].size:0;},'Ciclos');
+
+  // Citas sheet
+  if(citasPivotData){
+    const tp=citasPivotData.pivot;
+    makeSheet(function(sede,ym){return tp[sede]&&tp[sede][ym]?tp[sede][ym]:0;},'Citas Primera Vez');
+
+    // Conversion sheet
+    const rows2=[['Sede',...yms,'Total']];
+    const cp=pivot; const colC={}; yms.forEach(function(ym){colC[ym]={ciclos:0,citas:0};});
+    let gCiclos=0,gCitas=0;
+    sedes.forEach(function(sede){
+      const row=[sede]; let rCiclos=0,rCitas=0;
+      yms.forEach(function(ym){
+        const ciclos=cp[sede]&&cp[sede][ym]?cp[sede][ym].size:0;
+        const citas=tp[sede]&&tp[sede][ym]?tp[sede][ym]:0;
+        const conv=citas>0?parseFloat(((ciclos/citas)*100).toFixed(1)):0;
+        row.push(conv); colC[ym].ciclos+=ciclos; colC[ym].citas+=citas; rCiclos+=ciclos; rCitas+=citas;
+      });
+      row.push(rCitas>0?parseFloat(((rCiclos/rCitas)*100).toFixed(1)):0);
+      gCiclos+=rCiclos; gCitas+=rCitas; rows2.push(row);
+    });
+    rows2.push(['TOTAL',...yms.map(function(ym){return colC[ym].citas>0?parseFloat(((colC[ym].ciclos/colC[ym].citas)*100).toFixed(1)):0;}),
+      gCitas>0?parseFloat(((gCiclos/gCitas)*100).toFixed(1)):0]);
+    const ws3=XLSX.utils.aoa_to_sheet(rows2);
+    ws3['!cols']=[{wch:36},...yms.map(function(){return{wch:12};}),{wch:12}];
+    XLSX.utils.book_append_sheet(wb,ws3,'Conversión %');
+  }
+
+  XLSX.writeFile(wb,'Reporte_Ciclos_'+getMonthLabel()+'.xlsx');
+  showToast('Excel descargado','success');
+}
+
+function resetCiclos(){
+  ciclosRaw=[];pivotData=null;citasRaw=[];citasPivotData=null;
+  document.getElementById('ciclos-upload-section').style.display='block';
+  document.getElementById('ciclos-banner').classList.remove('visible');
+  document.getElementById('ciclos-file-input').value='';
+  document.getElementById('citas-banner').classList.remove('visible');
+  document.getElementById('citas-file-input').value='';
+  ['ciclos-filters','ciclos-result','citas-upload-section'].forEach(function(id){document.getElementById(id).classList.remove('visible');});
+  ['citas-container','pivot-container','conv-container'].forEach(function(id){document.getElementById(id).innerHTML='';});
+}
+
+</script>
+</body>
+</html>
