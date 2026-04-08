@@ -55,6 +55,7 @@ function handleCitasFile(file){
 function processCitasRows(rows,filename){
   if(!rows.length){showToast('Archivo citas vacío','error');return;}
   citasRaw=rows;
+  document.getElementById('citas-upload-section').style.display='none';
   document.getElementById('citas-banner').classList.add('visible');
   document.getElementById('citas-banner-name').textContent=filename;
   document.getElementById('citas-banner-meta').textContent=rows.length.toLocaleString()+' registros de citas';
@@ -63,6 +64,7 @@ function processCitasRows(rows,filename){
 
 function resetCitas(){
   citasRaw=[];citasPivotData=null;
+  document.getElementById('citas-upload-section').style.display='block';
   document.getElementById('citas-banner').classList.remove('visible');
   document.getElementById('citas-file-input').value='';
   document.getElementById('citas-container').innerHTML='';
@@ -150,6 +152,8 @@ function buildConversionTable(ciclosPivot, citasPivot){
 }
 
 
+let xdocSelectedDocs=null; // null = all
+
 // ═══════════════════════════════════════════════════════
 // CONVERSIÓN POR DOCTOR
 // ═══════════════════════════════════════════════════════
@@ -209,12 +213,20 @@ function buildXdoc(){
 
   // Only doctors with at least one ciclo or cita in 2025+
   const allDocs=new Set([...Object.keys(docCiclos),...Object.keys(docCitas)]);
-  const docs=[...allDocs].filter(function(d){
+  const allDocsList=[...allDocs].filter(function(d){
     return yms.some(function(ym){
       return (docCiclos[d]&&docCiclos[d][ym]&&docCiclos[d][ym].size>0)||
              (docCitas[d]&&docCitas[d][ym]&&docCitas[d][ym]>0);
     });
   }).sort();
+
+  // Initialize selection to all on first load
+  if(!xdocSelectedDocs) xdocSelectedDocs=new Set(allDocsList);
+
+  // Render doctor filter tags
+  renderXdocDocTags(allDocsList);
+
+  const docs=allDocsList.filter(function(d){return xdocSelectedDocs.has(d);});
 
   document.getElementById('xdoc-citas-container').innerHTML=renderXdocTable(docs,yms,
     function(doc,ym){return docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;},
@@ -233,8 +245,45 @@ function buildXdoc(){
     'pct','#9A6B00','#FEF9EC');
 
   // Store for export
-  window._xdocState={docs,yms,docCiclos,docCitas};
+  window._xdocState={docs:allDocsList,yms,docCiclos,docCitas};
+  show('xdoc-filters');
   show('xdoc-result');
+}
+
+
+function renderXdocDocTags(allDocsList){
+  const grid=document.getElementById('xdoc-doc-tags');
+  const list=document.getElementById('xdoc-doctors-list');
+  grid.innerHTML=''; list.innerHTML='';
+  // Only show selected doctors as tags
+  (xdocSelectedDocs?[...xdocSelectedDocs]:allDocsList).forEach(function(doc){
+    const t=document.createElement('div');t.className='tag at';
+    const span=document.createElement('span');span.textContent=doc;
+    const btn=document.createElement('button');btn.textContent='x';
+    btn.addEventListener('click',function(){
+      xdocSelectedDocs.delete(doc);
+      buildXdoc();
+    });
+    t.appendChild(span);t.appendChild(btn);
+    grid.appendChild(t);
+  });
+  // Datalist with all available
+  allDocsList.forEach(function(doc){
+    const o=document.createElement('option');o.value=doc;list.appendChild(o);
+  });
+}
+
+function xdocAddDoctor(){
+  const inp=document.getElementById('xdoc-add-input');
+  const v=inp.value.trim();if(!v)return;
+  if(window._xdocState){
+    const match=window._xdocState.docs.find(function(d){return d.toLowerCase()===v.toLowerCase()||d.toLowerCase().includes(v.toLowerCase());});
+    if(match){
+      xdocSelectedDocs.add(match);
+      inp.value='';
+      buildXdoc();
+    } else {showToast('Doctor no encontrado','error');}
+  }
 }
 
 function renderXdocTable(docs,yms,getValue,mode,col,bg){
@@ -339,15 +388,246 @@ function exportXdocExcel(){
   showToast('Excel descargado','success');
 }
 
+
+// ═══════════════════════════════════════════════════════
+// AGENDA / METAS
+// ═══════════════════════════════════════════════════════
+const SEDES_CONFIG=[
+  {id:'cdmx', name:'CDMX', fullName:'Fertilidad Integral (Ciudad de México)', color:'#4FEDE2'},
+  {id:'gdl',  name:'GDL',  fullName:'Fertilidad Integral (Guadalajara)',       color:'#9D94F8'},
+  {id:'met',  name:'MET',  fullName:'Fertilidad Integral (Metepec)',            color:'#F6BE6E'},
+];
+
+function getAgendaData(){
+  const data={};
+  SEDES_CONFIG.forEach(function(s){
+    data[s.id]={
+      meta:  parseInt(document.getElementById('meta-'+s.id)||0)  || 0,
+      logro: parseInt(document.getElementById('logro-'+s.id)||0) || 0,
+    };
+    const mEl=document.getElementById('meta-'+s.id);
+    const lEl=document.getElementById('logro-'+s.id);
+    if(mEl) data[s.id].meta=parseInt(mEl.value)||0;
+    if(lEl) data[s.id].logro=parseInt(lEl.value)||0;
+  });
+  return data;
+}
+
+function calcBono(pct, bonoTotal, bonoMinPct){
+  if(pct<bonoMinPct) return 0;
+  // proportional from min: at 70% → 3500, at 100% → 5000
+  const minBono=bonoTotal*(bonoMinPct/100);
+  const range=bonoTotal-minBono;
+  const rangePct=100-bonoMinPct;
+  return minBono+range*((pct-bonoMinPct)/rangePct);
+}
+
+function updateAgenda(){
+  // Update only dynamic elements without rebuilding inputs
+  const bonoTotal=parseFloat(document.getElementById('bono-total').value)||5000;
+  const bonoMinPct=parseFloat(document.getElementById('bono-min-pct').value)||70;
+  const minBono=bonoTotal*(bonoMinPct/100);
+  document.getElementById('bono-min-label').textContent=bonoMinPct+'%';
+  document.getElementById('bono-min-amount').textContent=fmtMXN(minBono);
+
+  let totalMeta=0,totalLogro=0,totalBono=0;
+  SEDES_CONFIG.forEach(function(s){
+    const meta=parseInt(document.getElementById('meta-'+s.id).value)||0;
+    const logro=parseInt(document.getElementById('logro-'+s.id).value)||0;
+    const pct=meta>0?Math.round((logro/meta)*100):0;
+    const bono=calcBono(pct,bonoTotal,bonoMinPct);
+    const barW=Math.min(pct,100);
+    const color=pct>=bonoMinPct?'#4FEDE2':'#F06466';
+
+    // Update bar
+    const bar=document.getElementById('bar-'+s.id);
+    if(bar){bar.style.width=barW+'%';bar.style.background=color;}
+    // Update pct
+    const pctEl=document.getElementById('pct-'+s.id);
+    if(pctEl){pctEl.textContent=pct+'%';pctEl.style.color=color;}
+    // Update dot
+    const dotEl=document.getElementById('dot-'+s.id);
+    if(dotEl){dotEl.style.background=color;}
+    // Update bono pill
+    const pillEl=document.getElementById('pill-'+s.id);
+    if(pillEl){
+      const bonoClass=bono>0?'earned':'none';
+      const bonoText=bono>0?'Bono: '+fmtMXN(bono):'Sin bono (< '+bonoMinPct+'%)';
+      pillEl.className='bono-pill '+bonoClass;
+      pillEl.textContent=bonoText;
+    }
+    totalMeta+=meta;totalLogro+=logro;totalBono+=bono;
+  });
+
+  // Update totals KPIs
+  const totalPct=totalMeta>0?Math.round((totalLogro/totalMeta)*100):0;
+  const totalsEl=document.getElementById('agenda-totals');
+  if(totalsEl){
+    totalsEl.innerHTML=
+      '<div class="total-kpi"><div class="stat-label">Meta total</div><div class="stat-val">'+totalMeta+'</div></div>'+
+      '<div class="total-kpi"><div class="stat-label">Logro total</div><div class="stat-val" style="color:var(--t1)">'+totalLogro+'</div></div>'+
+      '<div class="total-kpi"><div class="stat-label">Avance global</div><div class="stat-val" style="color:'+(totalPct>=bonoMinPct?'var(--t1)':'var(--danger)')+'">'+totalPct+'%</div></div>'+
+      '<div class="total-kpi"><div class="stat-label">Bono total estimado</div><div class="stat-val" style="color:var(--accent3)">'+fmtMXN(totalBono)+'</div></div>';
+  }
+
+  // Update summary table
+  const tbody=document.getElementById('agenda-summary-body');
+  if(tbody){
+    tbody.innerHTML='';
+    SEDES_CONFIG.forEach(function(s){
+      const meta=parseInt(document.getElementById('meta-'+s.id).value)||0;
+      const logro=parseInt(document.getElementById('logro-'+s.id).value)||0;
+      const pct=meta>0?Math.round((logro/meta)*100):0;
+      const bono=calcBono(pct,bonoTotal,bonoMinPct);
+      const color=pct>=bonoMinPct?'#4FEDE2':'#F06466';
+      const status=pct>=100?'✅ Meta alcanzada':pct>=bonoMinPct?'✅ Con bono':'🔴 Sin bono';
+      tbody.innerHTML+=
+        '<tr style="border-bottom:1px solid var(--border);">'+
+          '<td style="padding:12px 16px;color:var(--text);font-weight:600;">'+
+            '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+s.color+';margin-right:8px;"></span>'+s.name+
+          '</td>'+
+          '<td style="padding:12px 16px;text-align:right;font-family:monospace;color:var(--text2);">'+meta+'</td>'+
+          '<td style="padding:12px 16px;text-align:right;font-family:monospace;color:var(--text);">'+logro+'</td>'+
+          '<td style="padding:12px 16px;text-align:right;font-family:monospace;font-weight:700;color:'+color+';">'+pct+'%</td>'+
+          '<td style="padding:12px 16px;text-align:right;font-size:12px;">'+status+'</td>'+
+          '<td style="padding:12px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent3);">'+(bono>0?fmtMXN(bono):'—')+'</td>'+
+        '</tr>';
+    });
+    const totalPct2=totalMeta>0?Math.round((totalLogro/totalMeta)*100):0;
+    tbody.innerHTML+=
+      '<tr style="border-top:2px solid rgba(79,237,226,.3);background:var(--surface2);">'+
+        '<td style="padding:14px 16px;font-weight:700;color:var(--t1);font-family:monospace;">TOTAL</td>'+
+        '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalMeta+'</td>'+
+        '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalLogro+'</td>'+
+        '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalPct2+'%</td>'+
+        '<td style="padding:14px 16px;text-align:right;"></td>'+
+        '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent3);">'+fmtMXN(totalBono)+'</td>'+
+      '</tr>';
+  }
+}
+
+function renderAgenda(){
+  const bonoTotal=parseFloat(document.getElementById('bono-total').value)||5000;
+  const bonoMinPct=parseFloat(document.getElementById('bono-min-pct').value)||70;
+  const minBono=bonoTotal*(bonoMinPct/100);
+
+  document.getElementById('bono-min-label').textContent=bonoMinPct+'%';
+  document.getElementById('bono-min-amount').textContent=fmtMXN(minBono);
+
+  const data=getAgendaData();
+  const grid=document.getElementById('agenda-grid');
+  const tbody=document.getElementById('agenda-summary-body');
+  const totalsEl=document.getElementById('agenda-totals');
+
+  let totalMeta=0,totalLogro=0,totalBono=0;
+
+  // Build cards
+  grid.innerHTML='';
+  SEDES_CONFIG.forEach(function(s){
+    const d=data[s.id];
+    const pct=d.meta>0?Math.round((d.logro/d.meta)*100):0;
+    const bono=calcBono(pct,bonoTotal,bonoMinPct);
+    const barW=Math.min(pct,100);
+    const barColor=pct>=bonoMinPct?'#4FEDE2':'#F06466';
+    const dot=pct>=bonoMinPct?'#4FEDE2':'#F06466';
+
+    const bonoClass=bono>=bonoTotal?'earned':bono>0?'partial':'none';
+    const bonoText=bono>0?'Bono: '+fmtMXN(bono):'Sin bono (< '+bonoMinPct+'%)';
+
+    grid.innerHTML+=
+      '<div class="sede-block">'+
+        '<div class="sede-stripe" style="background:'+s.color+'"></div>'+
+        '<div class="sede-block-title">Sede</div>'+
+        '<div class="sede-name">'+s.name+' <span style="font-size:.85rem;color:var(--text3);">'+s.fullName+'</span></div>'+
+        '<div class="meta-row"><span class="meta-label">Meta (citas primera vez)</span>'+
+          '<input type="number" class="meta-input" id="meta-'+s.id+'" value="'+(d.meta||'')+'" placeholder="0" min="0" oninput="renderAgenda()">'+
+        '</div>'+
+        '<div class="meta-row"><span class="meta-label">Logro real</span>'+
+          '<input type="number" class="meta-input" id="logro-'+s.id+'" value="'+(d.logro||'')+'" placeholder="0" min="0" oninput="renderAgenda()">'+
+        '</div>'+
+        '<div class="progress-bar-wrap"><div class="progress-bar-fill" id="bar-'+s.id+'" style="width:'+barW+'%;background:'+barColor+'"></div></div>'+
+        '<div class="pct-row">'+
+          '<div><div class="pct-value" style="color:'+dot+'">'+pct+'%</div><div class="pct-label">de la meta</div></div>'+
+          '<span class="dot-status" style="background:'+dot+'"></span>'+
+        '</div>'+
+        '<div class="bono-pill '+bonoClass+'" id="pill-'+s.id+'">'+bonoText+'</div>'+
+      '</div>';
+
+    totalMeta+=d.meta; totalLogro+=d.logro; totalBono+=bono;
+  });
+
+  // Totals KPIs
+  const totalPct=totalMeta>0?Math.round((totalLogro/totalMeta)*100):0;
+  totalsEl.innerHTML=
+    '<div class="total-kpi"><div class="stat-label">Meta total</div><div class="stat-val">'+totalMeta+'</div></div>'+
+    '<div class="total-kpi"><div class="stat-label">Logro total</div><div class="stat-val" style="color:var(--t1)">'+totalLogro+'</div></div>'+
+    '<div class="total-kpi"><div class="stat-label">Avance global</div><div class="stat-val" style="color:'+(totalPct>=bonoMinPct?'var(--t1)':'var(--danger)')+'">'+totalPct+'%</div></div>'+
+    '<div class="total-kpi"><div class="stat-label">Bono total estimado</div><div class="stat-val" style="color:var(--accent3)">'+fmtMXN(totalBono)+'</div></div>';
+
+  // Summary table
+  tbody.innerHTML='';
+  SEDES_CONFIG.forEach(function(s){
+    const d=data[s.id];
+    const pct=d.meta>0?Math.round((d.logro/d.meta)*100):0;
+    const bono=calcBono(pct,bonoTotal,bonoMinPct);
+    const dot=pct>=bonoMinPct?'#4FEDE2':'#F06466';
+    const status=pct>=100?'✅ Meta alcanzada':pct>=bonoMinPct?'🟡 Con bono':'🔴 Sin bono';
+    tbody.innerHTML+=
+      '<tr style="border-bottom:1px solid var(--border);">'+
+        '<td style="padding:12px 16px;color:var(--text);font-weight:600;">'+
+          '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+s.color+';margin-right:8px;"></span>'+s.name+
+        '</td>'+
+        '<td style="padding:12px 16px;text-align:right;font-family:monospace;color:var(--text2);">'+d.meta+'</td>'+
+        '<td style="padding:12px 16px;text-align:right;font-family:monospace;color:var(--text);">'+d.logro+'</td>'+
+        '<td style="padding:12px 16px;text-align:right;font-family:monospace;font-weight:700;color:'+dot+';">'+pct+'%</td>'+
+        '<td style="padding:12px 16px;text-align:right;font-size:12px;">'+status+'</td>'+
+        '<td style="padding:12px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent3);">'+(bono>0?fmtMXN(bono):'—')+'</td>'+
+      '</tr>';
+  });
+  // Total row
+  tbody.innerHTML+=
+    '<tr style="border-top:2px solid rgba(79,237,226,.3);background:var(--surface2);">'+
+      '<td style="padding:14px 16px;font-weight:700;color:var(--t1);font-family:monospace;">TOTAL</td>'+
+      '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalMeta+'</td>'+
+      '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalLogro+'</td>'+
+      '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalPct+'%</td>'+
+      '<td style="padding:14px 16px;text-align:right;"></td>'+
+      '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent3);">'+fmtMXN(totalBono)+'</td>'+
+    '</tr>';
+}
+
+function resetAgenda(){
+  SEDES_CONFIG.forEach(function(s){
+    const m=document.getElementById('meta-'+s.id);
+    const l=document.getElementById('logro-'+s.id);
+    if(m) m.value='';
+    if(l) l.value='';
+  });
+  renderAgenda();
+}
+
+function fmtMXN(n){
+  return new Intl.NumberFormat('es-MX',{style:'currency',currency:'MXN',minimumFractionDigits:0,maximumFractionDigits:0}).format(n);
+}
+
+// Init agenda on first load
+document.addEventListener('DOMContentLoaded',function(){
+  const now=new Date();
+  const y=now.getFullYear();
+  const m=String(now.getMonth()+1).padStart(2,'0');
+  document.getElementById('agenda-month').value=y+'-'+m;
+  renderAgenda();
+});
+
 // ═══════════════════════════════════════════════════════
 // PAGE NAV
 // ═══════════════════════════════════════════════════════
 function switchPage(page){
-  ['ventas','ciclos','xdoc'].forEach(function(p){
+  ['ventas','ciclos','xdoc','agenda'].forEach(function(p){
     document.getElementById('page-'+p).classList.toggle('active', p===page);
     document.getElementById('nav-'+p).classList.toggle('active', p===page);
   });
-  if(page==='xdoc') buildXdoc();
+  if(page==='xdoc'){xdocSelectedDocs=null;buildXdoc();}
 }
 
 // ═══════════════════════════════════════════════════════
@@ -850,6 +1130,38 @@ function resetCiclos(){
   .conv-cell{color:var(--accent3);font-weight:700;}
   .pivot-table td.conv-hi{background:rgba(246,190,110,.15);color:var(--accent3);font-weight:700;}
   .pivot-table th.conv-h{color:var(--accent3);}
+
+  /* AGENDA / METAS */
+  .agenda-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:24px;}
+  @media(max-width:700px){.agenda-grid{grid-template-columns:1fr;}}
+  .sede-block{background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius-lg);padding:24px;position:relative;overflow:hidden;transition:border-color .2s;}
+  .sede-block:hover{border-color:var(--border2);}
+  .sede-block-title{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:12px;}
+  .sede-name{font-family:'DM Serif Display',serif;font-size:1.3rem;margin-bottom:20px;color:var(--text);}
+  .meta-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+  .meta-label{font-size:12px;color:var(--text2);}
+  .meta-input{width:90px;background:var(--surface3);border:1px solid var(--border2);color:var(--text);border-radius:8px;padding:7px 10px;font-family:'DM Mono',monospace;font-size:14px;font-weight:600;text-align:center;outline:none;transition:border-color .2s;}
+  .meta-input:focus{border-color:var(--accent);}
+  .progress-bar-wrap{margin:16px 0 8px;height:10px;background:var(--surface3);border-radius:999px;overflow:hidden;}
+  .progress-bar-fill{height:100%;border-radius:999px;transition:width .5s cubic-bezier(.4,0,.2,1),background .3s;}
+  .pct-row{display:flex;align-items:center;justify-content:space-between;}
+  .pct-value{font-family:'DM Serif Display',serif;font-size:2rem;line-height:1;}
+  .pct-label{font-size:11px;color:var(--text3);margin-top:4px;}
+  .bono-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:700;margin-top:10px;}
+  .bono-pill.earned{background:rgba(79,237,226,.12);color:var(--t1);border:1px solid rgba(79,237,226,.3);}
+  .bono-pill.partial{background:rgba(246,190,110,.12);color:var(--accent3);border:1px solid rgba(246,190,110,.3);}
+  .bono-pill.none{background:rgba(255,255,255,.05);color:var(--text3);border:1px solid var(--border2);}
+  .sede-stripe{position:absolute;top:0;left:0;width:4px;height:100%;border-radius:4px 0 0 4px;}
+  .totals-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px;}
+  .total-kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;}
+  .total-kpi .stat-label{font-size:11px;color:var(--text3);letter-spacing:1px;text-transform:uppercase;font-family:'DM Mono',monospace;margin-bottom:8px;}
+  .total-kpi .stat-val{font-family:'DM Serif Display',serif;font-size:1.7rem;}
+  .month-selector{display:flex;align-items:center;gap:10px;margin-bottom:24px;flex-wrap:wrap;}
+  .month-selector label{font-size:12px;color:var(--text2);}
+  .month-input{background:var(--surface2);border:1px solid var(--border2);color:var(--text);border-radius:8px;padding:8px 12px;font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;outline:none;}
+  .month-input:focus{border-color:var(--accent);}
+  .dot-status{width:12px;height:12px;border-radius:50%;display:inline-block;flex-shrink:0;}
+
 </style>
 </head>
 <body>
@@ -858,6 +1170,7 @@ function resetCiclos(){
     <button class="nav-btn active" id="nav-ventas" onclick="switchPage('ventas')">💰 Ventas por Dr</button>
     <button class="nav-btn" id="nav-ciclos" onclick="switchPage('ciclos')">📊 Conversión</button>
     <button class="nav-btn" id="nav-xdoc" onclick="switchPage('xdoc')">👨‍⚕️ Conversión por Doctor</button>
+    <button class="nav-btn" id="nav-agenda" onclick="switchPage('agenda')">🎯 Ventas / Agendamiento</button>
   </nav>
   <div class="page active" id="page-ventas">
 
@@ -1097,6 +1410,16 @@ function resetCiclos(){
       <p style="font-size:13px;color:var(--text2);">Genera primero las tablas en la pestaña <strong style="color:var(--t2)">Conversión</strong> para ver los datos aquí.</p>
     </div>
 
+    <div class="card section-hidden" id="xdoc-filters">
+      <div class="card-title">Doctores visibles</div>
+      <div class="tags-grid" id="xdoc-doc-tags"></div>
+      <div class="add-row">
+        <input type="text" class="input-field" id="xdoc-add-input" placeholder="Agregar doctor..." list="xdoc-doctors-list">
+        <datalist id="xdoc-doctors-list"></datalist>
+        <button class="btn btn-secondary" onclick="xdocAddDoctor()">+ Agregar</button>
+      </div>
+    </div>
+
     <div class="card section-hidden" id="xdoc-result">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:10px;">
         <div class="card-title" style="margin-bottom:0">Conversión — Doctor × Mes</div>
@@ -1110,6 +1433,68 @@ function resetCiclos(){
       <div id="xdoc-conv-container" style="overflow-x:auto;"></div>
     </div>
   </div><!-- end page-xdoc -->
+  <!-- ═══ AGENDA PAGE ═══ -->
+  <div class="page" id="page-agenda">
+    <header style="margin-bottom:36px;">
+      <div class="phase-badge" style="background:rgba(79,237,226,.1);border-color:rgba(79,237,226,.3);color:var(--t1);"><span class="phase-dot"></span>Metas & Bono</div>
+      <div class="logo-row"><div class="logo-icon">🎯</div><div class="logo-text">Sistema de Reportes</div></div>
+      <h1>Ventas / <em>Agendamiento</em></h1>
+      <p class="subtitle">Registra metas y logros por sede. El porcentaje y bono se calculan automáticamente. Los datos se guardan en tu sesión.</p>
+    </header>
+
+    <!-- Month selector -->
+    <div class="month-selector">
+      <label>Mes de reporte:</label>
+      <input type="month" class="month-input" id="agenda-month" oninput="renderAgenda()">
+      <button class="btn btn-secondary" onclick="resetAgenda()" style="font-size:12px;padding:7px 14px;">🗑 Limpiar datos</button>
+    </div>
+
+    <!-- Config row: bono total -->
+    <div class="card" style="margin-bottom:20px;">
+      <div class="card-title">Configuración de Bono</div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center;">
+        <div>
+          <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">Bono total disponible ($)</div>
+          <input type="number" class="meta-input" id="bono-total" value="5000" oninput="renderAgenda()" style="width:120px;">
+        </div>
+        <div>
+          <div style="font-size:12px;color:var(--text2);margin-bottom:6px;">Porcentaje mínimo para bono (%)</div>
+          <input type="number" class="meta-input" id="bono-min-pct" value="70" oninput="renderAgenda()" style="width:100px;">
+        </div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.6;padding:10px 14px;background:var(--surface2);border-radius:8px;border-left:3px solid var(--accent);">
+          El bono se da a partir del <strong id="bono-min-label" style="color:var(--accent)">70%</strong>.<br>
+          Monto mínimo de bono: <strong id="bono-min-amount" style="color:var(--accent3)">$3,500</strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- KPI totals -->
+    <div class="totals-row" id="agenda-totals"></div>
+
+    <!-- Sede cards -->
+    <div class="agenda-grid" id="agenda-grid"></div>
+
+    <!-- Summary table -->
+    <div class="card">
+      <div class="card-title">Resumen general</div>
+      <div style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;" id="agenda-summary-table">
+          <thead>
+            <tr>
+              <th style="background:var(--surface2);color:var(--text2);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:12px 16px;text-align:left;border-bottom:1px solid var(--border2);">Sede</th>
+              <th style="background:var(--surface2);color:var(--text2);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:12px 16px;text-align:right;border-bottom:1px solid var(--border2);">Meta</th>
+              <th style="background:var(--surface2);color:var(--text2);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:12px 16px;text-align:right;border-bottom:1px solid var(--border2);">Logro</th>
+              <th style="background:var(--surface2);color:var(--text2);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:12px 16px;text-align:right;border-bottom:1px solid var(--border2);">%</th>
+              <th style="background:var(--surface2);color:var(--text2);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:12px 16px;text-align:right;border-bottom:1px solid var(--border2);">Estatus</th>
+              <th style="background:var(--surface2);color:var(--text2);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:12px 16px;text-align:right;border-bottom:1px solid var(--border2);">Bono</th>
+            </tr>
+          </thead>
+          <tbody id="agenda-summary-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div><!-- end page-agenda -->
+
 
 
 </div>
@@ -1487,8 +1872,8 @@ function exportPDF(){
   +'th.r{text-align:right;}td{padding:6px 10px;border:1px solid #eee;font-size:11px;}td.r{text-align:right;}'
   +'tr:nth-child(even) td{background:#fafafa;}.tot td{font-weight:700;border-top:2px solid #ccc;}'
   +'.grand{text-align:right;font-size:14px;font-weight:700;margin-top:12px;padding-top:8px;border-top:2px solid;}'
-  +'.no-print{margin-bottom:24px;}@media print{.no-print{display:none;}body{margin:16px;}}'
-  +'</style></head><body>';
+  +'.no-print{margin-bottom:24px;}@media print{.no-print{display:none;}body{margin:16px;}}';
+  html+='</style></head><body>';
 
   html+='<h1>Reporte de Ventas — '+month+'</h1>';
   html+='<div class="meta">Generado el '+new Date().toLocaleDateString('es-MX',{weekday:'long',year:'numeric',month:'long',day:'numeric'})+'</div>';
@@ -1613,6 +1998,7 @@ function handleCitasFile(file){
 function processCitasRows(rows,filename){
   if(!rows.length){showToast('Archivo citas vacío','error');return;}
   citasRaw=rows;
+  document.getElementById('citas-upload-section').style.display='none';
   document.getElementById('citas-banner').classList.add('visible');
   document.getElementById('citas-banner-name').textContent=filename;
   document.getElementById('citas-banner-meta').textContent=rows.length.toLocaleString()+' registros de citas';
@@ -1621,6 +2007,7 @@ function processCitasRows(rows,filename){
 
 function resetCitas(){
   citasRaw=[];citasPivotData=null;
+  document.getElementById('citas-upload-section').style.display='block';
   document.getElementById('citas-banner').classList.remove('visible');
   document.getElementById('citas-file-input').value='';
   document.getElementById('citas-container').innerHTML='';
@@ -1708,6 +2095,8 @@ function buildConversionTable(ciclosPivot, citasPivot){
 }
 
 
+let xdocSelectedDocs=null; // null = all
+
 // ═══════════════════════════════════════════════════════
 // CONVERSIÓN POR DOCTOR
 // ═══════════════════════════════════════════════════════
@@ -1767,12 +2156,20 @@ function buildXdoc(){
 
   // Only doctors with at least one ciclo or cita in 2025+
   const allDocs=new Set([...Object.keys(docCiclos),...Object.keys(docCitas)]);
-  const docs=[...allDocs].filter(function(d){
+  const allDocsList=[...allDocs].filter(function(d){
     return yms.some(function(ym){
       return (docCiclos[d]&&docCiclos[d][ym]&&docCiclos[d][ym].size>0)||
              (docCitas[d]&&docCitas[d][ym]&&docCitas[d][ym]>0);
     });
   }).sort();
+
+  // Initialize selection to all on first load
+  if(!xdocSelectedDocs) xdocSelectedDocs=new Set(allDocsList);
+
+  // Render doctor filter tags
+  renderXdocDocTags(allDocsList);
+
+  const docs=allDocsList.filter(function(d){return xdocSelectedDocs.has(d);});
 
   document.getElementById('xdoc-citas-container').innerHTML=renderXdocTable(docs,yms,
     function(doc,ym){return docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;},
@@ -1791,8 +2188,45 @@ function buildXdoc(){
     'pct','#9A6B00','#FEF9EC');
 
   // Store for export
-  window._xdocState={docs,yms,docCiclos,docCitas};
+  window._xdocState={docs:allDocsList,yms,docCiclos,docCitas};
+  show('xdoc-filters');
   show('xdoc-result');
+}
+
+
+function renderXdocDocTags(allDocsList){
+  const grid=document.getElementById('xdoc-doc-tags');
+  const list=document.getElementById('xdoc-doctors-list');
+  grid.innerHTML=''; list.innerHTML='';
+  // Only show selected doctors as tags
+  (xdocSelectedDocs?[...xdocSelectedDocs]:allDocsList).forEach(function(doc){
+    const t=document.createElement('div');t.className='tag at';
+    const span=document.createElement('span');span.textContent=doc;
+    const btn=document.createElement('button');btn.textContent='x';
+    btn.addEventListener('click',function(){
+      xdocSelectedDocs.delete(doc);
+      buildXdoc();
+    });
+    t.appendChild(span);t.appendChild(btn);
+    grid.appendChild(t);
+  });
+  // Datalist with all available
+  allDocsList.forEach(function(doc){
+    const o=document.createElement('option');o.value=doc;list.appendChild(o);
+  });
+}
+
+function xdocAddDoctor(){
+  const inp=document.getElementById('xdoc-add-input');
+  const v=inp.value.trim();if(!v)return;
+  if(window._xdocState){
+    const match=window._xdocState.docs.find(function(d){return d.toLowerCase()===v.toLowerCase()||d.toLowerCase().includes(v.toLowerCase());});
+    if(match){
+      xdocSelectedDocs.add(match);
+      inp.value='';
+      buildXdoc();
+    } else {showToast('Doctor no encontrado','error');}
+  }
 }
 
 function renderXdocTable(docs,yms,getValue,mode,col,bg){
@@ -1897,15 +2331,246 @@ function exportXdocExcel(){
   showToast('Excel descargado','success');
 }
 
+
+// ═══════════════════════════════════════════════════════
+// AGENDA / METAS
+// ═══════════════════════════════════════════════════════
+const SEDES_CONFIG=[
+  {id:'cdmx', name:'CDMX', fullName:'Fertilidad Integral (Ciudad de México)', color:'#4FEDE2'},
+  {id:'gdl',  name:'GDL',  fullName:'Fertilidad Integral (Guadalajara)',       color:'#9D94F8'},
+  {id:'met',  name:'MET',  fullName:'Fertilidad Integral (Metepec)',            color:'#F6BE6E'},
+];
+
+function getAgendaData(){
+  const data={};
+  SEDES_CONFIG.forEach(function(s){
+    data[s.id]={
+      meta:  parseInt(document.getElementById('meta-'+s.id)||0)  || 0,
+      logro: parseInt(document.getElementById('logro-'+s.id)||0) || 0,
+    };
+    const mEl=document.getElementById('meta-'+s.id);
+    const lEl=document.getElementById('logro-'+s.id);
+    if(mEl) data[s.id].meta=parseInt(mEl.value)||0;
+    if(lEl) data[s.id].logro=parseInt(lEl.value)||0;
+  });
+  return data;
+}
+
+function calcBono(pct, bonoTotal, bonoMinPct){
+  if(pct<bonoMinPct) return 0;
+  // proportional from min: at 70% → 3500, at 100% → 5000
+  const minBono=bonoTotal*(bonoMinPct/100);
+  const range=bonoTotal-minBono;
+  const rangePct=100-bonoMinPct;
+  return minBono+range*((pct-bonoMinPct)/rangePct);
+}
+
+function updateAgenda(){
+  // Update only dynamic elements without rebuilding inputs
+  const bonoTotal=parseFloat(document.getElementById('bono-total').value)||5000;
+  const bonoMinPct=parseFloat(document.getElementById('bono-min-pct').value)||70;
+  const minBono=bonoTotal*(bonoMinPct/100);
+  document.getElementById('bono-min-label').textContent=bonoMinPct+'%';
+  document.getElementById('bono-min-amount').textContent=fmtMXN(minBono);
+
+  let totalMeta=0,totalLogro=0,totalBono=0;
+  SEDES_CONFIG.forEach(function(s){
+    const meta=parseInt(document.getElementById('meta-'+s.id).value)||0;
+    const logro=parseInt(document.getElementById('logro-'+s.id).value)||0;
+    const pct=meta>0?Math.round((logro/meta)*100):0;
+    const bono=calcBono(pct,bonoTotal,bonoMinPct);
+    const barW=Math.min(pct,100);
+    const color=pct>=bonoMinPct?'#4FEDE2':'#F06466';
+
+    // Update bar
+    const bar=document.getElementById('bar-'+s.id);
+    if(bar){bar.style.width=barW+'%';bar.style.background=color;}
+    // Update pct
+    const pctEl=document.getElementById('pct-'+s.id);
+    if(pctEl){pctEl.textContent=pct+'%';pctEl.style.color=color;}
+    // Update dot
+    const dotEl=document.getElementById('dot-'+s.id);
+    if(dotEl){dotEl.style.background=color;}
+    // Update bono pill
+    const pillEl=document.getElementById('pill-'+s.id);
+    if(pillEl){
+      const bonoClass=bono>0?'earned':'none';
+      const bonoText=bono>0?'Bono: '+fmtMXN(bono):'Sin bono (< '+bonoMinPct+'%)';
+      pillEl.className='bono-pill '+bonoClass;
+      pillEl.textContent=bonoText;
+    }
+    totalMeta+=meta;totalLogro+=logro;totalBono+=bono;
+  });
+
+  // Update totals KPIs
+  const totalPct=totalMeta>0?Math.round((totalLogro/totalMeta)*100):0;
+  const totalsEl=document.getElementById('agenda-totals');
+  if(totalsEl){
+    totalsEl.innerHTML=
+      '<div class="total-kpi"><div class="stat-label">Meta total</div><div class="stat-val">'+totalMeta+'</div></div>'+
+      '<div class="total-kpi"><div class="stat-label">Logro total</div><div class="stat-val" style="color:var(--t1)">'+totalLogro+'</div></div>'+
+      '<div class="total-kpi"><div class="stat-label">Avance global</div><div class="stat-val" style="color:'+(totalPct>=bonoMinPct?'var(--t1)':'var(--danger)')+'">'+totalPct+'%</div></div>'+
+      '<div class="total-kpi"><div class="stat-label">Bono total estimado</div><div class="stat-val" style="color:var(--accent3)">'+fmtMXN(totalBono)+'</div></div>';
+  }
+
+  // Update summary table
+  const tbody=document.getElementById('agenda-summary-body');
+  if(tbody){
+    tbody.innerHTML='';
+    SEDES_CONFIG.forEach(function(s){
+      const meta=parseInt(document.getElementById('meta-'+s.id).value)||0;
+      const logro=parseInt(document.getElementById('logro-'+s.id).value)||0;
+      const pct=meta>0?Math.round((logro/meta)*100):0;
+      const bono=calcBono(pct,bonoTotal,bonoMinPct);
+      const color=pct>=bonoMinPct?'#4FEDE2':'#F06466';
+      const status=pct>=100?'✅ Meta alcanzada':pct>=bonoMinPct?'✅ Con bono':'🔴 Sin bono';
+      tbody.innerHTML+=
+        '<tr style="border-bottom:1px solid var(--border);">'+
+          '<td style="padding:12px 16px;color:var(--text);font-weight:600;">'+
+            '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+s.color+';margin-right:8px;"></span>'+s.name+
+          '</td>'+
+          '<td style="padding:12px 16px;text-align:right;font-family:monospace;color:var(--text2);">'+meta+'</td>'+
+          '<td style="padding:12px 16px;text-align:right;font-family:monospace;color:var(--text);">'+logro+'</td>'+
+          '<td style="padding:12px 16px;text-align:right;font-family:monospace;font-weight:700;color:'+color+';">'+pct+'%</td>'+
+          '<td style="padding:12px 16px;text-align:right;font-size:12px;">'+status+'</td>'+
+          '<td style="padding:12px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent3);">'+(bono>0?fmtMXN(bono):'—')+'</td>'+
+        '</tr>';
+    });
+    const totalPct2=totalMeta>0?Math.round((totalLogro/totalMeta)*100):0;
+    tbody.innerHTML+=
+      '<tr style="border-top:2px solid rgba(79,237,226,.3);background:var(--surface2);">'+
+        '<td style="padding:14px 16px;font-weight:700;color:var(--t1);font-family:monospace;">TOTAL</td>'+
+        '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalMeta+'</td>'+
+        '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalLogro+'</td>'+
+        '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalPct2+'%</td>'+
+        '<td style="padding:14px 16px;text-align:right;"></td>'+
+        '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent3);">'+fmtMXN(totalBono)+'</td>'+
+      '</tr>';
+  }
+}
+
+function renderAgenda(){
+  const bonoTotal=parseFloat(document.getElementById('bono-total').value)||5000;
+  const bonoMinPct=parseFloat(document.getElementById('bono-min-pct').value)||70;
+  const minBono=bonoTotal*(bonoMinPct/100);
+
+  document.getElementById('bono-min-label').textContent=bonoMinPct+'%';
+  document.getElementById('bono-min-amount').textContent=fmtMXN(minBono);
+
+  const data=getAgendaData();
+  const grid=document.getElementById('agenda-grid');
+  const tbody=document.getElementById('agenda-summary-body');
+  const totalsEl=document.getElementById('agenda-totals');
+
+  let totalMeta=0,totalLogro=0,totalBono=0;
+
+  // Build cards
+  grid.innerHTML='';
+  SEDES_CONFIG.forEach(function(s){
+    const d=data[s.id];
+    const pct=d.meta>0?Math.round((d.logro/d.meta)*100):0;
+    const bono=calcBono(pct,bonoTotal,bonoMinPct);
+    const barW=Math.min(pct,100);
+    const barColor=pct>=bonoMinPct?'#4FEDE2':'#F06466';
+    const dot=pct>=bonoMinPct?'#4FEDE2':'#F06466';
+
+    const bonoClass=bono>=bonoTotal?'earned':bono>0?'partial':'none';
+    const bonoText=bono>0?'Bono: '+fmtMXN(bono):'Sin bono (< '+bonoMinPct+'%)';
+
+    grid.innerHTML+=
+      '<div class="sede-block">'+
+        '<div class="sede-stripe" style="background:'+s.color+'"></div>'+
+        '<div class="sede-block-title">Sede</div>'+
+        '<div class="sede-name">'+s.name+' <span style="font-size:.85rem;color:var(--text3);">'+s.fullName+'</span></div>'+
+        '<div class="meta-row"><span class="meta-label">Meta (citas primera vez)</span>'+
+          '<input type="number" class="meta-input" id="meta-'+s.id+'" value="'+(d.meta||'')+'" placeholder="0" min="0" oninput="renderAgenda()">'+
+        '</div>'+
+        '<div class="meta-row"><span class="meta-label">Logro real</span>'+
+          '<input type="number" class="meta-input" id="logro-'+s.id+'" value="'+(d.logro||'')+'" placeholder="0" min="0" oninput="renderAgenda()">'+
+        '</div>'+
+        '<div class="progress-bar-wrap"><div class="progress-bar-fill" id="bar-'+s.id+'" style="width:'+barW+'%;background:'+barColor+'"></div></div>'+
+        '<div class="pct-row">'+
+          '<div><div class="pct-value" style="color:'+dot+'">'+pct+'%</div><div class="pct-label">de la meta</div></div>'+
+          '<span class="dot-status" style="background:'+dot+'"></span>'+
+        '</div>'+
+        '<div class="bono-pill '+bonoClass+'" id="pill-'+s.id+'">'+bonoText+'</div>'+
+      '</div>';
+
+    totalMeta+=d.meta; totalLogro+=d.logro; totalBono+=bono;
+  });
+
+  // Totals KPIs
+  const totalPct=totalMeta>0?Math.round((totalLogro/totalMeta)*100):0;
+  totalsEl.innerHTML=
+    '<div class="total-kpi"><div class="stat-label">Meta total</div><div class="stat-val">'+totalMeta+'</div></div>'+
+    '<div class="total-kpi"><div class="stat-label">Logro total</div><div class="stat-val" style="color:var(--t1)">'+totalLogro+'</div></div>'+
+    '<div class="total-kpi"><div class="stat-label">Avance global</div><div class="stat-val" style="color:'+(totalPct>=bonoMinPct?'var(--t1)':'var(--danger)')+'">'+totalPct+'%</div></div>'+
+    '<div class="total-kpi"><div class="stat-label">Bono total estimado</div><div class="stat-val" style="color:var(--accent3)">'+fmtMXN(totalBono)+'</div></div>';
+
+  // Summary table
+  tbody.innerHTML='';
+  SEDES_CONFIG.forEach(function(s){
+    const d=data[s.id];
+    const pct=d.meta>0?Math.round((d.logro/d.meta)*100):0;
+    const bono=calcBono(pct,bonoTotal,bonoMinPct);
+    const dot=pct>=bonoMinPct?'#4FEDE2':'#F06466';
+    const status=pct>=100?'✅ Meta alcanzada':pct>=bonoMinPct?'🟡 Con bono':'🔴 Sin bono';
+    tbody.innerHTML+=
+      '<tr style="border-bottom:1px solid var(--border);">'+
+        '<td style="padding:12px 16px;color:var(--text);font-weight:600;">'+
+          '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+s.color+';margin-right:8px;"></span>'+s.name+
+        '</td>'+
+        '<td style="padding:12px 16px;text-align:right;font-family:monospace;color:var(--text2);">'+d.meta+'</td>'+
+        '<td style="padding:12px 16px;text-align:right;font-family:monospace;color:var(--text);">'+d.logro+'</td>'+
+        '<td style="padding:12px 16px;text-align:right;font-family:monospace;font-weight:700;color:'+dot+';">'+pct+'%</td>'+
+        '<td style="padding:12px 16px;text-align:right;font-size:12px;">'+status+'</td>'+
+        '<td style="padding:12px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent3);">'+(bono>0?fmtMXN(bono):'—')+'</td>'+
+      '</tr>';
+  });
+  // Total row
+  tbody.innerHTML+=
+    '<tr style="border-top:2px solid rgba(79,237,226,.3);background:var(--surface2);">'+
+      '<td style="padding:14px 16px;font-weight:700;color:var(--t1);font-family:monospace;">TOTAL</td>'+
+      '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalMeta+'</td>'+
+      '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalLogro+'</td>'+
+      '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--t1);">'+totalPct+'%</td>'+
+      '<td style="padding:14px 16px;text-align:right;"></td>'+
+      '<td style="padding:14px 16px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent3);">'+fmtMXN(totalBono)+'</td>'+
+    '</tr>';
+}
+
+function resetAgenda(){
+  SEDES_CONFIG.forEach(function(s){
+    const m=document.getElementById('meta-'+s.id);
+    const l=document.getElementById('logro-'+s.id);
+    if(m) m.value='';
+    if(l) l.value='';
+  });
+  renderAgenda();
+}
+
+function fmtMXN(n){
+  return new Intl.NumberFormat('es-MX',{style:'currency',currency:'MXN',minimumFractionDigits:0,maximumFractionDigits:0}).format(n);
+}
+
+// Init agenda on first load
+document.addEventListener('DOMContentLoaded',function(){
+  const now=new Date();
+  const y=now.getFullYear();
+  const m=String(now.getMonth()+1).padStart(2,'0');
+  document.getElementById('agenda-month').value=y+'-'+m;
+  renderAgenda();
+});
+
 // ═══════════════════════════════════════════════════════
 // PAGE NAV
 // ═══════════════════════════════════════════════════════
 function switchPage(page){
-  ['ventas','ciclos','xdoc'].forEach(function(p){
+  ['ventas','ciclos','xdoc','agenda'].forEach(function(p){
     document.getElementById('page-'+p).classList.toggle('active', p===page);
     document.getElementById('nav-'+p).classList.toggle('active', p===page);
   });
-  if(page==='xdoc') buildXdoc();
+  if(page==='xdoc'){xdocSelectedDocs=null;buildXdoc();}
 }
 
 // ═══════════════════════════════════════════════════════
