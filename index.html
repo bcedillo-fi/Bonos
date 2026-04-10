@@ -158,25 +158,28 @@ function buildXdoc(){
   }
   document.getElementById('xdoc-info-card').style.display='none';
 
-  const yms=pivotData.yms;
-
-  // ── Ciclos por doctor ───────────────────────────────
-  // pivot[sede][ym] is Set of his_name — we need doctor dimension from ciclosRaw
-  const docCiclos={};  // docCiclos[doctor][ym] = Set of his_name
-  const activeTratArr=[...activeTrats];
+  // Use months from ciclosRaw (new file) rather than pivotData
+  const ciclosYmSet=new Set();
   ciclosRaw.forEach(function(r){
-    const ym=parseFch(r.fch_pun);
+    const ym=parseFch(r[window.CICLOS_FIELDS?window.CICLOS_FIELDS.fecha:'F. Punción']);
+    if(ym) ciclosYmSet.add(ym);
+  });
+  const yms=ciclosYmSet.size>0?[...ciclosYmSet].sort():(pivotData?pivotData.yms:[]);
+
+  // ── Ciclos por doctor (nuevo Excel: ID count por F. Punción) ──
+  const F2=window.CICLOS_FIELDS||{fecha:'F. Punción',sede:'Delegación',doctor:'Profesional',id:'ID'};
+  const docCiclos={};  // docCiclos[doctor][ym] = count of IDs
+  ciclosRaw.forEach(function(r){
+    const ym=parseFch(r[F2.fecha]);
     if(!ym) return;
-    const year=parseInt(ym.substring(0,4));
-    if(isNaN(year)||year<2025) return;
-    const tipo=(r.tipo_paciente||'').trim();
-    if(!tipo||tipo==='Externo') return;
-    if(!activeTratArr.includes(r.tratamiento)) return;
-    const doc=(r.doctor||'').trim();
+    const doc=(r[F2.doctor]||'').trim();
     if(!doc) return;
+    // Apply sedeDocFilter
+    const sede=(r[F2.sede]||'').trim();
+    if(sedeDocFilter[sede]&&sedeDocFilter[sede].size>0&&!sedeDocFilter[sede].has(doc)) return;
     if(!docCiclos[doc]) docCiclos[doc]={};
-    if(!docCiclos[doc][ym]) docCiclos[doc][ym]=new Set();
-    docCiclos[doc][ym].add(r.his_name||r.his_id||'?');
+    if(!docCiclos[doc][ym]) docCiclos[doc][ym]=0;
+    docCiclos[doc][ym]++;
   });
 
   // ── Citas por doctor ────────────────────────────────
@@ -201,7 +204,7 @@ function buildXdoc(){
   const allDocs=new Set([...Object.keys(docCiclos),...Object.keys(docCitas)]);
   const allDocsList=[...allDocs].filter(function(d){
     return yms.some(function(ym){
-      return (docCiclos[d]&&docCiclos[d][ym]&&docCiclos[d][ym].size>0)||
+      return (docCiclos[d]&&docCiclos[d][ym]&&docCiclos[d][ym]>0)||
              (docCitas[d]&&docCitas[d][ym]&&docCitas[d][ym]>0);
     });
   }).sort();
@@ -218,17 +221,21 @@ function buildXdoc(){
     function(doc,ym){return docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;},
     'count','#5B3EA6','#EDE9FB');
 
+  const ciclosEl=document.getElementById('xdoc-ciclos-container');
+  if(ciclosEl) ciclosEl.innerHTML=renderXdocTable(docs,yms,
+    function(doc,ym){return docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym]:0;},
+    'count','#1B6CA8','#EBF5FB');
 
   document.getElementById('xdoc-conv-container').innerHTML=renderXdocTable(docs,yms,
     function(doc,ym){
-      const ciclos=docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym].size:0;
+      const ciclos=docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym]:0;
       const citas=docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;
       return citas>0?parseFloat(((ciclos/citas)*100).toFixed(1)):null;
     },
     'pct','#9A6B00','#FEF9EC');
 
   // Store for export
-  window._xdocState={docs:allDocsList,yms,docCiclos,docCitas};
+  window._xdocState={docs:allDocsList,yms,docCiclos,docCitas,isCount:true};
   show('xdoc-filters');
   show('xdoc-result');
 }
@@ -1737,6 +1744,8 @@ function resetCiclos(){
       </div>
       <div class="pivot-section-title" style="padding-top:0;border-top:none;margin-top:0;">Citas Primera Vez — Terminadas por Doctor</div>
       <div id="xdoc-citas-container" style="overflow-x:auto;margin-bottom:32px;"></div>
+      <div class="pivot-section-title">Ciclos por Doctor</div>
+      <div id="xdoc-ciclos-container" style="overflow-x:auto;margin-bottom:32px;"></div>
       <div class="pivot-section-title">Conversión % por Doctor</div>
       <div id="xdoc-conv-container" style="overflow-x:auto;"></div>
     </div>
@@ -2409,25 +2418,28 @@ function buildXdoc(){
   }
   document.getElementById('xdoc-info-card').style.display='none';
 
-  const yms=pivotData.yms;
-
-  // ── Ciclos por doctor ───────────────────────────────
-  // pivot[sede][ym] is Set of his_name — we need doctor dimension from ciclosRaw
-  const docCiclos={};  // docCiclos[doctor][ym] = Set of his_name
-  const activeTratArr=[...activeTrats];
+  // Use months from ciclosRaw (new file) rather than pivotData
+  const ciclosYmSet=new Set();
   ciclosRaw.forEach(function(r){
-    const ym=parseFch(r.fch_pun);
+    const ym=parseFch(r[window.CICLOS_FIELDS?window.CICLOS_FIELDS.fecha:'F. Punción']);
+    if(ym) ciclosYmSet.add(ym);
+  });
+  const yms=ciclosYmSet.size>0?[...ciclosYmSet].sort():(pivotData?pivotData.yms:[]);
+
+  // ── Ciclos por doctor (nuevo Excel: ID count por F. Punción) ──
+  const F2=window.CICLOS_FIELDS||{fecha:'F. Punción',sede:'Delegación',doctor:'Profesional',id:'ID'};
+  const docCiclos={};  // docCiclos[doctor][ym] = count of IDs
+  ciclosRaw.forEach(function(r){
+    const ym=parseFch(r[F2.fecha]);
     if(!ym) return;
-    const year=parseInt(ym.substring(0,4));
-    if(isNaN(year)||year<2025) return;
-    const tipo=(r.tipo_paciente||'').trim();
-    if(!tipo||tipo==='Externo') return;
-    if(!activeTratArr.includes(r.tratamiento)) return;
-    const doc=(r.doctor||'').trim();
+    const doc=(r[F2.doctor]||'').trim();
     if(!doc) return;
+    // Apply sedeDocFilter
+    const sede=(r[F2.sede]||'').trim();
+    if(sedeDocFilter[sede]&&sedeDocFilter[sede].size>0&&!sedeDocFilter[sede].has(doc)) return;
     if(!docCiclos[doc]) docCiclos[doc]={};
-    if(!docCiclos[doc][ym]) docCiclos[doc][ym]=new Set();
-    docCiclos[doc][ym].add(r.his_name||r.his_id||'?');
+    if(!docCiclos[doc][ym]) docCiclos[doc][ym]=0;
+    docCiclos[doc][ym]++;
   });
 
   // ── Citas por doctor ────────────────────────────────
@@ -2452,7 +2464,7 @@ function buildXdoc(){
   const allDocs=new Set([...Object.keys(docCiclos),...Object.keys(docCitas)]);
   const allDocsList=[...allDocs].filter(function(d){
     return yms.some(function(ym){
-      return (docCiclos[d]&&docCiclos[d][ym]&&docCiclos[d][ym].size>0)||
+      return (docCiclos[d]&&docCiclos[d][ym]&&docCiclos[d][ym]>0)||
              (docCitas[d]&&docCitas[d][ym]&&docCitas[d][ym]>0);
     });
   }).sort();
@@ -2469,17 +2481,21 @@ function buildXdoc(){
     function(doc,ym){return docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;},
     'count','#5B3EA6','#EDE9FB');
 
+  const ciclosEl=document.getElementById('xdoc-ciclos-container');
+  if(ciclosEl) ciclosEl.innerHTML=renderXdocTable(docs,yms,
+    function(doc,ym){return docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym]:0;},
+    'count','#1B6CA8','#EBF5FB');
 
   document.getElementById('xdoc-conv-container').innerHTML=renderXdocTable(docs,yms,
     function(doc,ym){
-      const ciclos=docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym].size:0;
+      const ciclos=docCiclos[doc]&&docCiclos[doc][ym]?docCiclos[doc][ym]:0;
       const citas=docCitas[doc]&&docCitas[doc][ym]?docCitas[doc][ym]:0;
       return citas>0?parseFloat(((ciclos/citas)*100).toFixed(1)):null;
     },
     'pct','#9A6B00','#FEF9EC');
 
   // Store for export
-  window._xdocState={docs:allDocsList,yms,docCiclos,docCitas};
+  window._xdocState={docs:allDocsList,yms,docCiclos,docCitas,isCount:true};
   show('xdoc-filters');
   show('xdoc-result');
 }
