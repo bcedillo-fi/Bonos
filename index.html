@@ -1460,6 +1460,17 @@ function resetCiclos(){
   .ms-item:hover{background:var(--surface2);}
   .ms-item input{accent-color:var(--primary);width:14px;height:14px;cursor:pointer;flex-shrink:0;}
   .ms-divider{height:1px;background:var(--border);margin:4px 0;}
+
+  /* COMMISSION */
+  .comm-bar{margin-top:16px;padding:16px;background:var(--surface2);border-radius:var(--radius);border:1px solid var(--border);display:none;}
+  .comm-bar.visible{display:block;}
+  .comm-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+  .comm-pct{font-family:'DM Serif Display',serif;font-size:2rem;color:var(--primary);line-height:1;}
+  .comm-amount{font-family:'DM Mono',monospace;font-size:1.1rem;font-weight:700;color:var(--accent3);}
+  .comm-label{font-size:11px;color:var(--text2);margin-top:2px;}
+  .comm-edit{display:flex;align-items:center;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border);}
+  .comm-input{width:70px;background:var(--surface);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:5px 8px;font-family:'DM Mono',monospace;font-size:13px;font-weight:600;text-align:center;outline:none;}
+  .comm-input:focus{border-color:var(--primary);}
 </style>
 </head>
 <body>
@@ -1824,6 +1835,18 @@ let exclusionWords=['almacenamiento','citas','check up'];
 let ovodoWords=['ovodonacion','donadora'];
 let groupedAll={}, groupedClean={}, groupedExcl={}, groupedOvodo={};
 let sortMode=0; // 0=default, 1=mayor a menor, 2=menor a mayor
+let comisiones={
+  'carlos alejandro parra vargas': 6,
+  'eugenia morán orozco': 6,
+  'eugenia moran orozco': 6,
+  'giovanni lópez salamanca': 5,
+  'giovanni lopez salamanca': 5,
+  'guadalupe nolazco beltrán': 3,
+  'guadalupe nolazco beltran': 3,
+  'jaime antonio hidalgo carrera': 4,
+  'jairo hernando pedraza pinto': 4,
+  'ruben gonzalez ruiz': 4,
+};
 let currentTableTab=1, currentDoctor='all';
 let COL={doctor:'',product:'',total:''};
 
@@ -1978,7 +2001,7 @@ function processData(){
     document.getElementById('loading').classList.remove('visible');
     if(!totalRows){showToast('Sin registros','error');return;}
     currentTableTab=1;currentDoctor='all';
-    renderStats(totalRows);renderTableTabs();renderDocTabs();renderValidation();renderTable();
+    renderStats(totalRows);renderTableTabs();renderDocTabs();renderValidation();renderTable();renderCommission();
     document.getElementById('results').classList.add('visible');
     showToast('Reporte generado','success');
     document.getElementById('results').scrollIntoView({behavior:'smooth',block:'start'});
@@ -1997,7 +2020,7 @@ function renderStats(totalRows){
 }
 
 // ── TABLE TABS ─────────────────────────────────────────
-function switchTableTab(n){currentTableTab=n;document.getElementById('search-input').value='';renderTableTabs();renderDocTabs();renderValidation();renderTable();}
+function switchTableTab(n){currentTableTab=n;document.getElementById('search-input').value='';renderTableTabs();renderDocTabs();renderValidation();renderTable();renderCommission();}
 function renderTableTabs(){
   const classes=['at1','at2','at3','at4'];
   [1,2,3,4].forEach(n=>{
@@ -2090,7 +2113,54 @@ function renderDocTabs(){
     row.appendChild(btn);
   });
 }
-function switchDocTab(doc){currentDoctor=doc;document.getElementById('search-input').value='';renderDocTabs();renderValidation();renderTable();}
+function switchDocTab(doc){currentDoctor=doc;document.getElementById('search-input').value='';renderDocTabs();renderValidation();renderTable();renderCommission();}
+
+
+// ── COMMISSION ─────────────────────────────────────────
+function renderCommission(){
+  const bar=document.getElementById('comm-bar');
+  if(!bar) return;
+
+  // Only show for single doctor on tabla 2
+  if(currentTableTab!==2||currentDoctor==='all'){bar.classList.remove('visible');return;}
+
+  const pct=comisiones[currentDoctor]||comisiones[norm(currentDoctor)]||null;
+
+  // Calc total for current view
+  const data=activeData();
+  const prods=data[currentDoctor]||{};
+  const total=Object.values(prods).reduce(function(s,p){return s+p.total;},0);
+  const comm=pct?total*(pct/100):null;
+
+  bar.classList.add('visible');
+  bar.innerHTML=
+    '<div style="font-family:monospace;font-size:10px;font-weight:600;color:var(--primary);letter-spacing:2px;text-transform:uppercase;margin-bottom:12px;">Comisión — '+title(currentDoctor)+'</div>'+
+    '<div class="comm-row">'+
+      '<div>'+
+        '<div class="comm-pct">'+(pct!==null?pct+'%':'—')+'</div>'+
+        '<div class="comm-label">porcentaje de comisión</div>'+
+      '</div>'+
+      '<div style="text-align:right;">'+
+        '<div class="comm-amount">'+(comm!==null?fmt(comm):'—')+'</div>'+
+        '<div class="comm-label">sobre '+fmt(total)+' total sin IVA</div>'+
+      '</div>'+
+    '</div>'+
+    '<div class="comm-edit">'+
+      '<span style="font-size:12px;color:var(--text2);">Editar %:</span>'+
+      '<input type="number" class="comm-input" id="comm-pct-input" value="'+(pct||'')+'" min="0" max="100" placeholder="0">'+
+      '<button class="btn btn-primary" style="padding:5px 14px;font-size:12px;" onclick="saveCommission()">Guardar</button>'+
+    '</div>';
+}
+
+function saveCommission(){
+  const inp=document.getElementById('comm-pct-input');
+  if(!inp) return;
+  const val=parseFloat(inp.value);
+  if(isNaN(val)) return;
+  comisiones[currentDoctor]=val;
+  comisiones[norm(currentDoctor)]=val;
+  renderCommission();
+}
 
 // ── SORT ───────────────────────────────────────────────
 function toggleSort(){
@@ -2224,6 +2294,20 @@ function exportPDF(){
   });
 
   html+='<div class="grand" style="color:'+col+';border-color:'+col+';">TOTAL GENERAL: '+fmt(gTotal)+'</div>';
+  // Commission
+  if(tNum===2&&doc!=='all'){
+    const commPct=comisiones[doc]||comisiones[norm(doc)]||null;
+    if(commPct!==null){
+      const commAmt=gTotal*(commPct/100);
+      html+='<div style="margin-top:16px;padding:14px 18px;background:#EBF5FB;border-radius:8px;border-left:4px solid '+col+';display:flex;justify-content:space-between;align-items:center;">'
+        +'<div><div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:1px;">Comisión</div>'
+        +'<div style="font-size:22px;font-weight:700;color:'+col+';">'+commPct+'%</div></div>'
+        +'<div style="text-align:right;"><div style="font-size:11px;color:#666;">Monto comisión</div>'
+        +'<div style="font-size:18px;font-weight:700;color:#9A6B00;">'+fmt(commAmt)+'</div>'
+        +'<div style="font-size:11px;color:#999;">sobre '+fmt(gTotal)+'</div></div>'
+        +'</div>';
+    }
+  }
   html+='</body></html>';
   // Inject into hidden iframe and trigger print
   let iframe=document.getElementById('pdf-iframe');
