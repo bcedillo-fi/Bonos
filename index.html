@@ -1878,7 +1878,7 @@ function handleFile(file){
       if(!rawData.length){showToast('Archivo vacío','error');return;}
       detectColumns(Object.keys(rawData[0]));
       allDoctors=[...new Set(rawData.map(r=>norm(r[COL.doctor])).filter(Boolean))].sort();
-      selectedDoctors=allDoctors.filter(d=>DEFAULT_DOCTORS.some(def=>d.includes(def)||def.includes(d)));
+      selectedDoctors=allDoctors.filter(d=>DEFAULT_DOCTORS.some(def=>d===def));
       document.getElementById('upload-section').style.display='none';
       document.getElementById('file-banner').classList.add('visible');
       document.getElementById('banner-name').textContent=file.name;
@@ -1916,7 +1916,7 @@ function renderDoctors(){
 }
 function addDoctor(){
   const inp=document.getElementById('new-doctor');const v=norm(inp.value);if(!v)return;
-  const match=allDoctors.find(d=>norm(d)===v||d.includes(v)||norm(title(d))===norm(inp.value));
+  const match=allDoctors.find(d=>norm(d)===v||norm(title(d))===norm(inp.value)||norm(d).includes(v));
   if(!match){showToast('Doctor no encontrado','error');return;}
   if(selectedDoctors.includes(match)){showToast('Ya está en la lista','error');return;}
   selectedDoctors.push(match);inp.value='';renderDoctors();updateProcessInfo();
@@ -1975,7 +1975,7 @@ function updateProcessInfo(){
   info.innerHTML=`<span>${selectedDoctors.length}</span> doctores · <span>${count.toLocaleString()}</span> registros · <span>${exclusionWords.length}</span> filtros`;
   btn.disabled=false;
 }
-function matchesDoc(d){return selectedDoctors.some(sel=>d===sel||d.includes(sel)||sel.includes(d));}
+function matchesDoc(d){return selectedDoctors.some(sel=>d===sel);}
 
 // ── PROCESS ────────────────────────────────────────────
 function processData(){
@@ -1985,7 +1985,7 @@ function processData(){
     groupedAll={};groupedClean={};groupedExcl={};groupedOvodo={};let totalRows=0;
     rawData.forEach(row=>{
       const dn=norm(row[COL.doctor]);
-      const matched=selectedDoctors.find(sel=>dn===sel||dn.includes(sel)||sel.includes(dn));
+      const matched=selectedDoctors.find(sel=>dn===sel);
       if(!matched)return;
       const prod=(row[COL.product]||'').toString().trim()||'(Sin nombre)';
       const total=parseFloat(row[COL.total])||0;
